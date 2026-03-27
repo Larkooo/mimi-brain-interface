@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mimi Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'SF Mono', monospace; background: #0a0a0a; color: #e0e0e0; padding: 2rem; }
+  h1 { font-size: 1.5rem; margin-bottom: 1.5rem; color: #fff; }
+  h2 { font-size: 1.1rem; margin-bottom: 0.75rem; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; margin-bottom: 2rem; }
+  .card { background: #141414; border: 1px solid #222; border-radius: 8px; padding: 1.25rem; }
+  .stat { display: flex; justify-content: space-between; padding: 0.4rem 0; border-bottom: 1px solid #1a1a1a; }
+  .stat:last-child { border-bottom: none; }
+  .stat-label { color: #666; }
+  .stat-value { color: #fff; font-weight: 600; }
+  .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+  .status-dot.running { background: #22c55e; }
+  .status-dot.stopped { background: #ef4444; }
+  .query-box { width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 0.75rem; color: #e0e0e0; font-family: inherit; font-size: 0.9rem; resize: vertical; min-height: 60px; }
+  .query-box:focus { outline: none; border-color: #555; }
+  button { background: #222; border: 1px solid #333; border-radius: 6px; padding: 0.5rem 1rem; color: #e0e0e0; cursor: pointer; font-family: inherit; }
+  button:hover { background: #333; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.5rem; }
+  th { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #333; color: #888; }
+  td { padding: 0.4rem 0.6rem; border-bottom: 1px solid #1a1a1a; }
+  .search-input { width: 100%; background: #1a1a1a; border: 1px solid #333; border-radius: 6px; padding: 0.5rem 0.75rem; color: #e0e0e0; font-family: inherit; margin-bottom: 0.75rem; }
+  .search-input:focus { outline: none; border-color: #555; }
+  #results { max-height: 400px; overflow-y: auto; }
+  .empty { color: #555; font-style: italic; padding: 1rem 0; }
+</style>
+</head>
+<body>
+
+<h1 id="title">Mimi Dashboard</h1>
+
+<div class="grid">
+  <div class="card">
+    <h2>Status</h2>
+    <div id="status-content">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>Brain</h2>
+    <div id="brain-content">Loading...</div>
+  </div>
+  <div class="card">
+    <h2>Memory</h2>
+    <div id="memory-content">Loading...</div>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+  <h2>Search Entities</h2>
+  <input type="text" class="search-input" id="search-input" placeholder="Search entities...">
+  <div id="search-results"></div>
+</div>
+
+<div class="card" style="margin-bottom: 1.5rem;">
+  <h2>Entities</h2>
+  <div id="entities-content">Loading...</div>
+</div>
+
+<div class="card">
+  <h2>Query Brain</h2>
+  <textarea class="query-box" id="query-input" placeholder="SELECT * FROM entities LIMIT 10"></textarea>
+  <div style="margin-top: 0.5rem; display: flex; gap: 0.5rem;">
+    <button onclick="runQuery()">Run</button>
+  </div>
+  <div id="query-results" style="margin-top: 0.75rem;"></div>
+</div>
+
+<script>
+async function load() {
+  try {
+    const res = await fetch('/api/status');
+    const data = await res.json();
+
+    document.getElementById('title').textContent = data.name + ' Dashboard';
+    document.title = data.name + ' Dashboard';
+
+    document.getElementById('status-content').innerHTML = `
+      <div class="stat">
+        <span class="stat-label">Session</span>
+        <span class="stat-value"><span class="status-dot ${data.session_running ? 'running' : 'stopped'}"></span>${data.session_running ? 'Running' : 'Stopped'}</span>
+      </div>
+      <div class="stat">
+        <span class="stat-label">Claude</span>
+        <span class="stat-value">${data.claude_version || 'unknown'}</span>
+      </div>
+    `;
+
+    const bs = data.brain_stats;
+    let typesHtml = '';
+    if (bs.entity_types.length > 0) {
+      typesHtml = bs.entity_types.map(([t, c]) =>
+        `<div class="stat"><span class="stat-label">${t}</span><span class="stat-value">${c}</span></div>`
+      ).join('');
+    }
+
+    document.getElementById('brain-content').innerHTML = `
+      <div class="stat"><span class="stat-label">Entities</span><span class="stat-value">${bs.entities}</span></div>
+      <div class="stat"><span class="stat-label">Relationships</span><span class="stat-value">${bs.relationships}</span></div>
+      <div class="stat"><span class="stat-label">Memory refs</span><span class="stat-value">${bs.memory_refs}</span></div>
+      ${typesHtml}
+    `;
+
+    document.getElementById('memory-content').innerHTML = `
+      <div class="stat"><span class="stat-label">Files</span><span class="stat-value">${data.memory_files}</span></div>
+    `;
+
+    loadEntities();
+  } catch (e) {
+    document.getElementById('status-content').innerHTML = '<div class="empty">Failed to load</div>';
+  }
+}
+
+async function loadEntities() {
+  try {
+    const res = await fetch('/api/brain/entities');
+    const entities = await res.json();
+    if (entities.length === 0) {
+      document.getElementById('entities-content').innerHTML = '<div class="empty">No entities yet</div>';
+      return;
+    }
+    document.getElementById('entities-content').innerHTML = `
+      <table>
+        <thead><tr><th>ID</th><th>Type</th><th>Name</th><th>Created</th></tr></thead>
+        <tbody>${entities.map(e => `<tr><td>${e.id}</td><td>${e.type}</td><td>${e.name}</td><td>${e.created_at}</td></tr>`).join('')}</tbody>
+      </table>
+    `;
+  } catch(e) {
+    document.getElementById('entities-content').innerHTML = '<div class="empty">Failed to load</div>';
+  }
+}
+
+let searchTimeout;
+document.getElementById('search-input').addEventListener('input', (e) => {
+  clearTimeout(searchTimeout);
+  const q = e.target.value.trim();
+  if (!q) { document.getElementById('search-results').innerHTML = ''; return; }
+  searchTimeout = setTimeout(async () => {
+    try {
+      const res = await fetch('/api/brain/search?q=' + encodeURIComponent(q));
+      const results = await res.json();
+      if (results.length === 0) {
+        document.getElementById('search-results').innerHTML = '<div class="empty">No results</div>';
+        return;
+      }
+      document.getElementById('search-results').innerHTML = `
+        <table>
+          <thead><tr><th>ID</th><th>Type</th><th>Name</th></tr></thead>
+          <tbody>${results.map(e => `<tr><td>${e.id}</td><td>${e.type}</td><td>${e.name}</td></tr>`).join('')}</tbody>
+        </table>
+      `;
+    } catch(e) {
+      document.getElementById('search-results').innerHTML = '<div class="empty">Search failed</div>';
+    }
+  }, 300);
+});
+
+async function runQuery() {
+  const sql = document.getElementById('query-input').value.trim();
+  if (!sql) return;
+  try {
+    const res = await fetch('/api/brain/query', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      document.getElementById('query-results').innerHTML = `<div class="empty">${text}</div>`;
+      return;
+    }
+    const rows = await res.json();
+    if (rows.length === 0) {
+      document.getElementById('query-results').innerHTML = '<div class="empty">(no results)</div>';
+      return;
+    }
+    const cols = rows[0].map(([k]) => k);
+    document.getElementById('query-results').innerHTML = `
+      <table>
+        <thead><tr>${cols.map(c => `<th>${c}</th>`).join('')}</tr></thead>
+        <tbody>${rows.map(row => `<tr>${row.map(([, v]) => `<td>${v}</td>`).join('')}</tr>`).join('')}</tbody>
+      </table>
+    `;
+  } catch(e) {
+    document.getElementById('query-results').innerHTML = `<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+document.getElementById('query-input').addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') runQuery();
+});
+
+load();
+setInterval(load, 10000);
+</script>
+</body>
+</html>
