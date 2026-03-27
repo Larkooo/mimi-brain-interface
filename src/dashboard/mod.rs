@@ -2,7 +2,6 @@ use axum::{
     Router,
     extract::Json,
     http::StatusCode,
-    response::Html,
     routing::{delete, get, post},
 };
 use serde::{Deserialize, Serialize};
@@ -13,13 +12,13 @@ use std::fs;
 
 pub async fn serve(port: u16) {
     // Try to find the React build directory
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-    let dashboard_dist = exe_dir
-        .as_ref()
-        .map(|d| d.join("../dashboard/dist"))
-        .filter(|p| p.exists());
+    // Check: cwd/dashboard/dist, exe/../../../dashboard/dist, ~/.mimi/dashboard/dist
+    let candidates = [
+        std::env::current_dir().ok().map(|d| d.join("dashboard/dist")),
+        std::env::current_exe().ok().and_then(|p| p.parent()?.parent()?.parent().map(|p| p.join("dashboard/dist"))),
+        dirs::home_dir().map(|d| d.join(".mimi/dashboard/dist")),
+    ];
+    let dashboard_dist = candidates.into_iter().flatten().find(|p| p.exists());
 
     let mut app = Router::new()
         // Status
@@ -48,14 +47,16 @@ pub async fn serve(port: u16) {
         // Backup
         .route("/api/backup", post(api_backup));
 
-    // Serve React build if available, otherwise fall back to embedded HTML
-    if let Some(dist) = dashboard_dist {
+    // Serve React build
+    if let Some(ref dist) = dashboard_dist {
+        let index_path = dist.join("index.html");
         app = app.fallback_service(
             tower_http::services::ServeDir::new(dist)
-                .fallback(tower_http::services::ServeFile::new("index.html")),
+                .fallback(tower_http::services::ServeFile::new(index_path)),
         );
     } else {
-        app = app.route("/", get(index));
+        eprintln!("Warning: dashboard/dist not found. Run 'cd dashboard && bun run build' first.");
+        eprintln!("Searched: cwd/dashboard/dist, exe dir, ~/.mimi/dashboard/dist");
     }
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -63,10 +64,6 @@ pub async fn serve(port: u16) {
         .expect("failed to bind");
 
     axum::serve(listener, app).await.expect("server failed");
-}
-
-async fn index() -> Html<&'static str> {
-    Html(include_str!("index.html"))
 }
 
 // --- Status ---
