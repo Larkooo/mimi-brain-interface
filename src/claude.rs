@@ -30,21 +30,18 @@ pub fn plugin(args: &[&str]) {
     run_claude(&cmd_args);
 }
 
-/// Launch claude in the ~/.mimi directory
-pub fn launch() {
-    let mimi_home = crate::paths::home();
-    let status = Command::new("claude")
-        .arg("--resume")
-        .current_dir(&mimi_home)
-        .status()
-        .expect("failed to run claude — is it installed?");
-    if !status.success() {
-        std::process::exit(status.code().unwrap_or(1));
-    }
+/// Install a Claude Code plugin
+pub fn plugin_install(plugin_name: &str) {
+    run_claude(&["plugin", "install", plugin_name]);
 }
 
-/// Launch claude in a tmux session
-pub fn launch_tmux(session_name: &str) {
+/// List installed plugins
+pub fn plugin_list_output() -> String {
+    run_claude_output(&["plugin", "list"])
+}
+
+/// Launch claude in a tmux session with optional channels
+pub fn launch_tmux(session_name: &str, channels: &[String]) {
     let mimi_home = crate::paths::home();
 
     // Kill existing session
@@ -52,6 +49,13 @@ pub fn launch_tmux(session_name: &str) {
         .args(["kill-session", "-t", session_name])
         .output()
         .ok();
+
+    // Build the claude command string
+    // Mimi runs with full permissions — she manages herself
+    let mut claude_cmd = "claude --resume --dangerously-skip-permissions".to_string();
+    for channel in channels {
+        claude_cmd.push_str(&format!(" --channels {}", channel));
+    }
 
     let status = Command::new("tmux")
         .args([
@@ -61,13 +65,16 @@ pub fn launch_tmux(session_name: &str) {
             session_name,
             "-c",
             mimi_home.to_str().unwrap(),
-            "claude --resume",
+            &claude_cmd,
         ])
         .status()
         .expect("failed to start tmux — is it installed?");
 
     if status.success() {
         println!("Mimi is alive in tmux session '{session_name}'");
+        if !channels.is_empty() {
+            println!("Channels: {}", channels.join(", "));
+        }
         println!("Attach with: tmux attach -t {session_name}");
     } else {
         eprintln!("Failed to start tmux session");

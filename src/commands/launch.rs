@@ -1,4 +1,5 @@
 use crate::paths;
+use crate::commands::channel;
 
 pub fn run() {
     if !paths::brain_db().exists() {
@@ -12,7 +13,8 @@ pub fn run() {
         .and_then(|v| v.as_str())
         .unwrap_or("mimi");
 
-    crate::claude::launch_tmux(session_name);
+    let channels = channel::enabled_channel_flags();
+    crate::claude::launch_tmux(session_name, &channels);
 }
 
 fn load_config() -> serde_json::Value {

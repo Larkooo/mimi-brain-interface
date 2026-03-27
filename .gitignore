@@ -3,3 +3,4 @@ brain.db
 *.db-wal
 *.db-shm
 .DS_Store
+dashboard/node_modules

@@ -50,6 +50,8 @@ enum Commands {
     Config,
     /// Backup ~/.mimi/ data
     Backup,
+    /// Run a self-reflection cycle (prefrontal cortex)
+    Reflect,
 }
 
 #[derive(Subcommand)]
@@ -174,5 +176,6 @@ async fn main() {
         }
         Some(Commands::Config) => commands::config::run(),
         Some(Commands::Backup) => commands::backup::run(),
+        Some(Commands::Reflect) => commands::reflect::run(),
     }
 }
