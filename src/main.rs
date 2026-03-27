@@ -52,6 +52,8 @@ enum Commands {
     Backup,
     /// Run a self-reflection cycle (prefrontal cortex)
     Reflect,
+    /// Audit own codebase and propose improvements via PR
+    Audit,
 }
 
 #[derive(Subcommand)]
@@ -177,5 +179,6 @@ async fn main() {
         Some(Commands::Config) => commands::config::run(),
         Some(Commands::Backup) => commands::backup::run(),
         Some(Commands::Reflect) => commands::reflect::run(),
+        Some(Commands::Audit) => commands::audit::run(),
     }
 }

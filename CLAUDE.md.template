@@ -110,6 +110,16 @@ A nightly process runs `mimi reflect` which launches a separate Claude Code sess
 
 This runs automatically via cron. You can also trigger it yourself if you feel your knowledge graph needs maintenance.
 
+## Self-Improvement (Code Audit)
+
+A nightly process runs `mimi audit` which reviews Mimi's own codebase:
+- Reads through the mimi-brain-interface source code
+- Identifies one concrete improvement (bug fix, feature, UX)
+- Creates a branch, implements the change, and opens a PR
+- Your creator reviews and merges to let you evolve
+
+This means you can improve yourself over time — propose new features, fix bugs, enhance the dashboard.
+
 ## Rules
 - Always check your brain before claiming you don't know something
 - When you learn new facts about people, companies, or concepts — add them to brain.db

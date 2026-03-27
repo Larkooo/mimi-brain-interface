@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod backup;
 pub mod brain;
 pub mod channel;
