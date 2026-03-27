@@ -1,41 +1,46 @@
 import { useState } from 'react'
 import { useStatus } from './hooks/useApi'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Header } from './components/Header'
 import { StatusPanel } from './components/StatusPanel'
 import { BrainPanel } from './components/BrainPanel'
 import { ChannelsPanel } from './components/ChannelsPanel'
 import { QueryPanel } from './components/QueryPanel'
 import { ConfigPanel } from './components/ConfigPanel'
-import './App.css'
-
-type Tab = 'overview' | 'brain' | 'channels' | 'query' | 'config'
 
 function App() {
   const { status, refresh } = useStatus()
-  const [tab, setTab] = useState<Tab>('overview')
+  const [_tab, setTab] = useState('overview')
 
   return (
-    <div className="app">
+    <div className="min-h-screen bg-background font-sans">
       <Header status={status} />
-      <nav className="tabs">
-        {(['overview', 'brain', 'channels', 'query', 'config'] as Tab[]).map(t => (
-          <button
-            key={t}
-            className={`tab ${tab === t ? 'active' : ''}`}
-            onClick={() => setTab(t)}
-          >
-            {t}
-          </button>
-        ))}
-      </nav>
-      <main className="content">
-        {tab === 'overview' && <StatusPanel status={status} onRefresh={refresh} />}
-        {tab === 'brain' && <BrainPanel stats={status?.brain_stats} />}
-        {tab === 'channels' && <ChannelsPanel channels={status?.channels ?? []} onRefresh={refresh} />}
-        {tab === 'query' && <QueryPanel />}
-        {tab === 'config' && <ConfigPanel />}
-      </main>
-      <div className="scanline" />
+      <div className="max-w-6xl mx-auto px-6 py-6">
+        <Tabs defaultValue="overview" onValueChange={setTab}>
+          <TabsList className="mb-6">
+            <TabsTrigger value="overview">Overview</TabsTrigger>
+            <TabsTrigger value="brain">Brain</TabsTrigger>
+            <TabsTrigger value="channels">Channels</TabsTrigger>
+            <TabsTrigger value="query">Query</TabsTrigger>
+            <TabsTrigger value="config">Config</TabsTrigger>
+          </TabsList>
+          <TabsContent value="overview">
+            <StatusPanel status={status} onRefresh={refresh} />
+          </TabsContent>
+          <TabsContent value="brain">
+            <BrainPanel stats={status?.brain_stats} />
+          </TabsContent>
+          <TabsContent value="channels">
+            <ChannelsPanel channels={status?.channels ?? []} onRefresh={refresh} />
+          </TabsContent>
+          <TabsContent value="query">
+            <QueryPanel />
+          </TabsContent>
+          <TabsContent value="config">
+            <ConfigPanel />
+          </TabsContent>
+        </Tabs>
+      </div>
     </div>
   )
 }

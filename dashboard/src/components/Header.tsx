@@ -1,55 +1,25 @@
 import type { Status } from '../hooks/useApi'
+import { Badge } from '@/components/ui/badge'
 
 export function Header({ status }: { status: Status | null }) {
   const name = status?.name ?? 'Mimi'
 
   return (
-    <header style={{
-      padding: '1.5rem 2rem',
-      display: 'flex',
-      alignItems: 'center',
-      justifyContent: 'space-between',
-      borderBottom: '1px solid var(--border)',
-    }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-        <div style={{
-          width: 32,
-          height: 32,
-          borderRadius: '50%',
-          background: status?.session_running
-            ? 'radial-gradient(circle, var(--accent) 0%, transparent 70%)'
-            : 'radial-gradient(circle, var(--danger) 0%, transparent 70%)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'center',
-          boxShadow: status?.session_running
-            ? '0 0 20px var(--accent-glow)'
-            : 'none',
-        }}>
-          <div style={{
-            width: 10,
-            height: 10,
-            borderRadius: '50%',
-            background: status?.session_running ? 'var(--accent)' : 'var(--danger)',
-          }} />
+    <header className="border-b border-border px-6 py-4 flex items-center justify-between">
+      <div className="flex items-center gap-3">
+        <div className="relative">
+          <div className={`w-3 h-3 rounded-full ${status?.session_running ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]' : 'bg-red-500'}`} />
         </div>
-        <span style={{
-          fontSize: '1.1rem',
-          fontWeight: 600,
-          color: 'var(--text-bright)',
-          letterSpacing: '-0.02em',
-        }}>
-          {name}
-        </span>
+        <h1 className="text-lg font-semibold tracking-tight">{name}</h1>
         {status && (
-          <span className={`tag ${status.session_running ? 'tag-success' : 'tag-danger'}`}>
+          <Badge variant={status.session_running ? 'default' : 'destructive'}>
             {status.session_running ? 'online' : 'offline'}
-          </span>
+          </Badge>
         )}
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+      <div className="flex items-center gap-4">
         {status && (
-          <span style={{ fontSize: '0.75rem', color: 'var(--text-dim)', fontFamily: "'JetBrains Mono', monospace" }}>
+          <span className="text-xs text-muted-foreground font-mono">
             {status.claude_version}
           </span>
         )}

@@ -114,11 +114,11 @@ export async function saveConfig(config: Record<string, unknown>) {
   });
 }
 
-export async function addChannel(type: string) {
+export async function addChannel(type: string, token?: string) {
   return api('/api/channels/add', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ type }),
+    body: JSON.stringify({ type, token }),
   });
 }
 
@@ -128,6 +128,14 @@ export async function removeChannel(name: string) {
 
 export async function toggleChannel(name: string) {
   return api(`/api/channels/${name}/toggle`, { method: 'POST' });
+}
+
+export async function configureChannel(name: string, token: string) {
+  return api(`/api/channels/${name}/configure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
 }
 
 export async function createBackup() {

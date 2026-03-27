@@ -1,6 +1,11 @@
 import { useState, useEffect } from 'react'
 import type { BrainStats, Entity } from '../hooks/useApi'
 import { getEntities, searchEntities, addEntity, addRelationship } from '../hooks/useApi'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Badge } from '@/components/ui/badge'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
 export function BrainPanel({ stats }: { stats?: BrainStats }) {
   const [entities, setEntities] = useState<Entity[]>([])
@@ -42,92 +47,105 @@ export function BrainPanel({ stats }: { stats?: BrainStats }) {
     load()
   }
 
+  const types = ['person', 'company', 'service', 'concept', 'account', 'project', 'location', 'event']
+  const relTypes = ['knows', 'works_at', 'has_account', 'owns', 'related_to', 'created', 'member_of', 'depends_on']
+
   return (
-    <>
-      {/* Stats overview */}
+    <div className="space-y-4">
       {stats && (
-        <div className="grid-3 mb-1">
-          <div className="card" style={{ textAlign: 'center' }}>
-            <div className="big-number" style={{ color: 'var(--accent)' }}>{stats.entities}</div>
-            <div className="big-label">entities</div>
-          </div>
-          <div className="card" style={{ textAlign: 'center' }}>
-            <div className="big-number" style={{ color: 'var(--purple)' }}>{stats.relationships}</div>
-            <div className="big-label">relationships</div>
-          </div>
-          <div className="card" style={{ textAlign: 'center' }}>
-            <div className="big-number" style={{ color: 'var(--success)' }}>{stats.memory_refs}</div>
-            <div className="big-label">memory refs</div>
-          </div>
+        <div className="grid grid-cols-3 gap-4">
+          {[
+            { label: 'Entities', value: stats.entities, color: 'text-blue-400' },
+            { label: 'Relationships', value: stats.relationships, color: 'text-purple-400' },
+            { label: 'Memory Refs', value: stats.memory_refs, color: 'text-emerald-400' },
+          ].map(s => (
+            <Card key={s.label}>
+              <CardContent className="pt-6 text-center">
+                <div className={`text-3xl font-bold font-mono ${s.color}`}>{s.value}</div>
+                <div className="text-xs text-muted-foreground mt-1">{s.label}</div>
+              </CardContent>
+            </Card>
+          ))}
         </div>
       )}
 
-      {/* Search + Entity list */}
-      <div className="card mb-1">
-        <h3>Entities</h3>
-        <input
-          className="input mb-1"
-          placeholder="Search entities..."
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
-        {entities.length === 0 ? (
-          <div className="empty">{search ? 'No results' : 'No entities yet'}</div>
-        ) : (
-          <div className="table-wrap">
-            <table>
-              <thead>
-                <tr><th>ID</th><th>Type</th><th>Name</th><th>Properties</th><th>Created</th></tr>
-              </thead>
-              <tbody>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-sm">Entities</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Input
+            placeholder="Search entities..."
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            className="mb-4"
+          />
+          {entities.length === 0 ? (
+            <p className="text-sm text-muted-foreground text-center py-4">
+              {search ? 'No results' : 'No entities yet'}
+            </p>
+          ) : (
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16">ID</TableHead>
+                  <TableHead>Type</TableHead>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Properties</TableHead>
+                  <TableHead>Created</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
                 {entities.map(e => (
-                  <tr key={e.id}>
-                    <td style={{ color: 'var(--accent)' }}>{e.id}</td>
-                    <td><span className="tag tag-purple">{e.type}</span></td>
-                    <td style={{ color: 'var(--text-bright)' }}>{e.name}</td>
-                    <td style={{ color: 'var(--text-muted)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <TableRow key={e.id}>
+                    <TableCell className="font-mono text-blue-400">{e.id}</TableCell>
+                    <TableCell><Badge variant="secondary">{e.type}</Badge></TableCell>
+                    <TableCell className="font-medium">{e.name}</TableCell>
+                    <TableCell className="text-muted-foreground text-xs font-mono max-w-[200px] truncate">
                       {JSON.stringify(e.properties) !== '{}' ? JSON.stringify(e.properties) : ''}
-                    </td>
-                    <td style={{ color: 'var(--text-dim)' }}>{e.created_at}</td>
-                  </tr>
+                    </TableCell>
+                    <TableCell className="text-muted-foreground text-xs">{e.created_at}</TableCell>
+                  </TableRow>
                 ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+              </TableBody>
+            </Table>
+          )}
+        </CardContent>
+      </Card>
 
-      {/* Add entity */}
-      <div className="grid-2">
-        <div className="card">
-          <h3>Add Entity</h3>
-          <div className="btn-row mb-1">
-            <select className="input" style={{ width: 'auto' }} value={newType} onChange={e => setNewType(e.target.value)}>
-              {['person', 'company', 'service', 'concept', 'account', 'project', 'location', 'event'].map(t => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-            <input className="input" placeholder="Name" value={newName} onChange={e => setNewName(e.target.value)} style={{ flex: 1 }} />
-          </div>
-          <input className="input mb-1" placeholder='Properties JSON: {"key":"value"}' value={newProps} onChange={e => setNewProps(e.target.value)} />
-          <button className="btn btn-accent" onClick={handleAddEntity}>Add Entity</button>
-        </div>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Add Entity</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex gap-2">
+              <select className="flex h-9 w-auto rounded-md border border-input bg-transparent px-3 py-1 text-sm" value={newType} onChange={e => setNewType(e.target.value)}>
+                {types.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <Input placeholder="Name" value={newName} onChange={e => setNewName(e.target.value)} />
+            </div>
+            <Input placeholder='Properties: {"key":"value"}' value={newProps} onChange={e => setNewProps(e.target.value)} />
+            <Button size="sm" onClick={handleAddEntity}>Add Entity</Button>
+          </CardContent>
+        </Card>
 
-        {/* Add relationship */}
-        <div className="card">
-          <h3>Add Relationship</h3>
-          <div className="btn-row mb-1">
-            <input className="input" placeholder="Source ID" value={linkSource} onChange={e => setLinkSource(e.target.value)} style={{ width: 80 }} />
-            <select className="input" style={{ width: 'auto' }} value={linkRel} onChange={e => setLinkRel(e.target.value)}>
-              {['knows', 'works_at', 'has_account', 'owns', 'related_to', 'created', 'member_of', 'depends_on'].map(t => (
-                <option key={t} value={t}>{t}</option>
-              ))}
-            </select>
-            <input className="input" placeholder="Target ID" value={linkTarget} onChange={e => setLinkTarget(e.target.value)} style={{ width: 80 }} />
-          </div>
-          <button className="btn btn-accent" onClick={handleAddLink}>Link</button>
-        </div>
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm">Add Relationship</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex gap-2">
+              <Input placeholder="Source ID" value={linkSource} onChange={e => setLinkSource(e.target.value)} className="w-24" />
+              <select className="flex h-9 w-auto rounded-md border border-input bg-transparent px-3 py-1 text-sm" value={linkRel} onChange={e => setLinkRel(e.target.value)}>
+                {relTypes.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+              <Input placeholder="Target ID" value={linkTarget} onChange={e => setLinkTarget(e.target.value)} className="w-24" />
+            </div>
+            <Button size="sm" onClick={handleAddLink}>Link</Button>
+          </CardContent>
+        </Card>
       </div>
-    </>
+    </div>
   )
 }

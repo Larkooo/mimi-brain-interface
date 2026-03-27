@@ -114,6 +114,42 @@ pub fn add(channel_type: &str) {
     }
 }
 
+/// Configure a channel with a bot token
+/// Writes the token to ~/.claude/channels/<type>/.env
+pub fn configure(channel_type: &str, token: &str) {
+    let env_var = match channel_type {
+        "telegram" => "TELEGRAM_BOT_TOKEN",
+        "discord" => "DISCORD_BOT_TOKEN",
+        _ => {
+            eprintln!("Unknown channel type for token configuration: {}", channel_type);
+            return;
+        }
+    };
+
+    // Write to ~/.claude/channels/<type>/.env (where the Claude Code plugin expects it)
+    let claude_channel_dir = dirs::home_dir()
+        .expect("no home dir")
+        .join(".claude")
+        .join("channels")
+        .join(channel_type);
+    fs::create_dir_all(&claude_channel_dir).ok();
+
+    let env_path = claude_channel_dir.join(".env");
+    fs::write(&env_path, format!("{}={}\n", env_var, token)).ok();
+
+    // Also save the token in our channel config
+    let config_path = paths::channels_dir().join(format!("{}.json", channel_type));
+    if let Ok(content) = fs::read_to_string(&config_path) {
+        if let Ok(mut config) = serde_json::from_str::<serde_json::Value>(&content) {
+            config["configured"] = serde_json::json!(true);
+            fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).ok();
+        }
+    }
+
+    println!("Configured {} with bot token", channel_type);
+    println!("Token written to: {}", env_path.display());
+}
+
 pub fn remove(name: &str) {
     let path = paths::channels_dir().join(format!("{}.json", name));
     if path.exists() {

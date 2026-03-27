@@ -1,5 +1,9 @@
 import { useState, useEffect } from 'react'
 import { getConfig, saveConfig } from '../hooks/useApi'
+import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { Badge } from '@/components/ui/badge'
 
 export function ConfigPanel() {
   const [json, setJson] = useState('')
@@ -23,22 +27,25 @@ export function ConfigPanel() {
   }
 
   return (
-    <div className="card">
-      <h3>Configuration</h3>
-      <textarea
-        className="textarea mb-1"
-        style={{ minHeight: 200 }}
-        value={json}
-        onChange={e => { setJson(e.target.value); setSaved(false); setError(null); }}
-      />
-      <div className="btn-row">
-        <button className="btn btn-accent" onClick={handleSave}>Save Config</button>
-        {saved && <span style={{ color: 'var(--success)', fontSize: '0.8rem' }}>Saved</span>}
-        {error && <span style={{ color: 'var(--danger)', fontSize: '0.8rem' }}>{error}</span>}
-      </div>
-      <div style={{ marginTop: '0.75rem', fontSize: '0.8rem', color: 'var(--text-dim)' }}>
-        Changes to session_name or model require a relaunch to take effect.
-      </div>
-    </div>
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Configuration</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        <Textarea
+          className="font-mono text-sm min-h-[200px]"
+          value={json}
+          onChange={e => { setJson(e.target.value); setSaved(false); setError(null); }}
+        />
+        <div className="flex items-center gap-3">
+          <Button onClick={handleSave}>Save Config</Button>
+          {saved && <Badge variant="default" className="bg-emerald-600">Saved</Badge>}
+          {error && <Badge variant="destructive">{error}</Badge>}
+        </div>
+        <p className="text-xs text-muted-foreground">
+          Changes to session_name or model require a relaunch to take effect.
+        </p>
+      </CardContent>
+    </Card>
   )
 }
