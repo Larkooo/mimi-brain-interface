@@ -30,6 +30,7 @@ pub async fn serve(port: u16) {
         .route("/api/brain/relationships/add", post(api_brain_add_relationship))
         .route("/api/brain/search", get(api_brain_search))
         .route("/api/brain/query", post(api_brain_query))
+        .route("/api/brain/graph", get(api_brain_graph))
         // Channels
         .route("/api/channels", get(api_channels_list))
         .route("/api/channels/add", post(api_channels_add))
@@ -194,6 +195,11 @@ async fn api_brain_query(
     }
     let db = brain::open();
     Ok(Json(brain::raw_query(&db, sql)))
+}
+
+async fn api_brain_graph() -> Json<brain::GraphData> {
+    let db = brain::open();
+    Json(brain::get_graph(&db))
 }
 
 // --- Channels ---
