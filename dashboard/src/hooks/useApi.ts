@@ -141,3 +141,107 @@ export async function configureChannel(name: string, token: string) {
 export async function createBackup() {
   return api('/api/backup', { method: 'POST' });
 }
+
+// --- Brain Graph ---
+
+export interface GraphNode {
+  id: number;
+  name: string;
+  type: string;
+  properties: Record<string, unknown>;
+  connections: number;
+}
+
+export interface GraphLink {
+  source: number;
+  target: number;
+  type: string;
+}
+
+export interface GraphData {
+  nodes: GraphNode[];
+  links: GraphLink[];
+}
+
+export async function getGraph(): Promise<GraphData> {
+  return api('/api/brain/graph');
+}
+
+// --- Crons ---
+
+export interface CronJob {
+  id: string;
+  name: string;
+  schedule: string;
+  prompt: string;
+  description: string;
+  enabled: boolean;
+}
+
+export async function getCrons(): Promise<CronJob[]> {
+  return api('/api/crons');
+}
+
+export async function createCron(name: string, schedule: string, prompt: string, description: string) {
+  return api('/api/crons', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, schedule, prompt, description }),
+  });
+}
+
+export async function deleteCron(id: string) {
+  return api(`/api/crons/${id}`, { method: 'DELETE' });
+}
+
+export async function toggleCron(id: string) {
+  return api(`/api/crons/${id}/toggle`, { method: 'POST' });
+}
+
+// --- Secrets ---
+
+export interface SecretEntry {
+  name: string;
+  created_at: string;
+}
+
+export async function getSecrets(): Promise<SecretEntry[]> {
+  return api('/api/secrets');
+}
+
+export async function setSecret(name: string, value: string) {
+  return api('/api/secrets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, value }),
+  });
+}
+
+export async function deleteSecret(name: string) {
+  return api(`/api/secrets/${name}`, { method: 'DELETE' });
+}
+
+// --- Memory ---
+
+export interface MemoryFile {
+  name: string;
+  description: string;
+  type: string;
+  filename: string;
+}
+
+export function useMemoryFiles() {
+  const [files, setFiles] = useState<MemoryFile[]>([]);
+
+  useEffect(() => {
+    api<MemoryFile[]>('/api/memory')
+      .then(setFiles)
+      .catch(() => setFiles([]));
+  }, []);
+
+  return { files };
+}
+
+export async function getMemoryFile(filename: string): Promise<{ content: string }> {
+  return api(`/api/memory/${encodeURIComponent(filename)}`);
+}
