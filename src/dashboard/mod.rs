@@ -31,6 +31,7 @@ pub async fn serve(port: u16) {
         .route("/api/brain/relationships/add", post(api_brain_add_relationship))
         .route("/api/brain/search", get(api_brain_search))
         .route("/api/brain/query", post(api_brain_query))
+        .route("/api/brain/graph", get(api_brain_graph))
         // Channels
         .route("/api/channels", get(api_channels_list))
         .route("/api/channels/add", post(api_channels_add))
@@ -218,6 +219,13 @@ async fn api_brain_query(
     let rows = brain::raw_query(&db, sql)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(rows))
+}
+
+async fn api_brain_graph() -> Result<Json<brain::GraphData>, (StatusCode, String)> {
+    let db = brain::open();
+    let graph = brain::get_graph(&db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(graph))
 }
 
 // --- Channels ---
