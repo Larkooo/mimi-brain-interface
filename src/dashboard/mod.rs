@@ -153,7 +153,8 @@ async fn api_brain_add_entity(
     Json(body): Json<AddEntityBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = brain::open();
-    let id = brain::add_entity(&db, &body.r#type, &body.name, &body.properties);
+    let id = brain::add_entity(&db, &body.r#type, &body.name, &body.properties)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({ "id": id, "name": body.name, "type": body.r#type })))
 }
 
@@ -168,7 +169,8 @@ async fn api_brain_add_relationship(
     Json(body): Json<AddRelBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let db = brain::open();
-    let id = brain::add_relationship(&db, body.source_id, &body.r#type, body.target_id);
+    let id = brain::add_relationship(&db, body.source_id, &body.r#type, body.target_id)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
@@ -193,7 +195,9 @@ async fn api_brain_query(
         return Err((StatusCode::BAD_REQUEST, "Only SELECT/WITH queries allowed via API".to_string()));
     }
     let db = brain::open();
-    Ok(Json(brain::raw_query(&db, sql)))
+    let results = brain::raw_query(&db, sql)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    Ok(Json(results))
 }
 
 // --- Channels ---
