@@ -45,15 +45,21 @@ pub fn run() {
 
     // Brain stats
     let db = brain::open();
-    let stats = brain::get_stats(&db);
-    println!("  Entities: {}", stats.entities);
-    println!("  Links:    {}", stats.relationships);
-    println!("  Mem refs: {}", stats.memory_refs);
+    match brain::get_stats(&db) {
+        Ok(stats) => {
+            println!("  Entities: {}", stats.entities);
+            println!("  Links:    {}", stats.relationships);
+            println!("  Mem refs: {}", stats.memory_refs);
 
-    if !stats.entity_types.is_empty() {
-        println!("\n  Entity types:");
-        for (t, c) in &stats.entity_types {
-            println!("    {}: {}", t, c);
+            if !stats.entity_types.is_empty() {
+                println!("\n  Entity types:");
+                for (t, c) in &stats.entity_types {
+                    println!("    {}: {}", t, c);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("  Brain stats error: {}", e);
         }
     }
 

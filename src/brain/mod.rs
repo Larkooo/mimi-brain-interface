@@ -69,7 +69,7 @@ pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i6
     Ok(db.last_insert_rowid())
 }
 
-pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Vec<Entity> {
+pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Result<Vec<Entity>, String> {
     let mut sql = "SELECT id, type, name, properties, created_at, updated_at FROM entities"
         .to_string();
     if entity_type.is_some() {
@@ -77,32 +77,32 @@ pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Vec<Entity> 
     }
     sql.push_str(" ORDER BY updated_at DESC");
 
-    let mut stmt = db.prepare(&sql).expect("bad query");
+    let mut stmt = db.prepare(&sql).map_err(|e| format!("failed to prepare query: {e}"))?;
     let rows = if let Some(t) = entity_type {
         stmt.query_map(params![t], row_to_entity)
     } else {
         stmt.query_map([], row_to_entity)
     };
-    rows.expect("query failed")
+    Ok(rows.map_err(|e| format!("query failed: {e}"))?
         .filter_map(|r| r.ok())
-        .collect()
+        .collect())
 }
 
-pub fn search_entities(db: &Connection, query: &str) -> Vec<Entity> {
+pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, String> {
     let mut stmt = db
         .prepare(
             "SELECT e.id, e.type, e.name, e.properties, e.created_at, e.updated_at \
              FROM entities_fts fts JOIN entities e ON fts.rowid = e.id \
              WHERE entities_fts MATCH ?1 ORDER BY rank",
         )
-        .expect("bad query");
-    stmt.query_map(params![query], row_to_entity)
-        .expect("query failed")
+        .map_err(|e| format!("failed to prepare search query: {e}"))?;
+    Ok(stmt.query_map(params![query], row_to_entity)
+        .map_err(|e| format!("search query failed: {e}"))?
         .filter_map(|r| r.ok())
-        .collect()
+        .collect())
 }
 
-pub fn get_stats(db: &Connection) -> Stats {
+pub fn get_stats(db: &Connection) -> Result<Stats, String> {
     let entities: usize = db
         .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
         .unwrap_or(0);
@@ -115,29 +115,29 @@ pub fn get_stats(db: &Connection) -> Stats {
 
     let mut stmt = db
         .prepare("SELECT type, COUNT(*) FROM entities GROUP BY type")
-        .unwrap();
+        .map_err(|e| format!("failed to query entity types: {e}"))?;
     let entity_types: Vec<(String, usize)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
+        .map_err(|e| format!("failed to query entity types: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
     let mut stmt = db
         .prepare("SELECT type, COUNT(*) FROM relationships GROUP BY type")
-        .unwrap();
+        .map_err(|e| format!("failed to query relationship types: {e}"))?;
     let relationship_types: Vec<(String, usize)> = stmt
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
-        .unwrap()
+        .map_err(|e| format!("failed to query relationship types: {e}"))?
         .filter_map(|r| r.ok())
         .collect();
 
-    Stats {
+    Ok(Stats {
         entities,
         relationships,
         memory_refs,
         entity_types,
         relationship_types,
-    }
+    })
 }
 
 pub fn raw_query(db: &Connection, sql: &str) -> Result<Vec<Vec<(String, String)>>, String> {
