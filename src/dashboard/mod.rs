@@ -27,6 +27,7 @@ pub async fn serve(port: u16) {
         .route("/api/brain/stats", get(api_brain_stats))
         .route("/api/brain/entities", get(api_brain_entities))
         .route("/api/brain/entities/add", post(api_brain_add_entity))
+        .route("/api/brain/entities/{id}", delete(api_brain_delete_entity))
         .route("/api/brain/relationships/add", post(api_brain_add_relationship))
         .route("/api/brain/search", get(api_brain_search))
         .route("/api/brain/query", post(api_brain_query))
@@ -164,6 +165,15 @@ async fn api_brain_add_entity(
     let id = brain::add_entity(&db, &body.r#type, &body.name, &body.properties)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(serde_json::json!({ "id": id, "name": body.name, "type": body.r#type })))
+}
+
+async fn api_brain_delete_entity(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let db = brain::open();
+    brain::delete_entity(&db, id)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({ "ok": true, "deleted": id })))
 }
 
 #[derive(Deserialize)]

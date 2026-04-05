@@ -75,6 +75,16 @@ pub fn add_entity(db: &Connection, entity_type: &str, name: &str, properties: &s
     Ok(db.last_insert_rowid())
 }
 
+pub fn delete_entity(db: &Connection, id: i64) -> Result<(), String> {
+    let changes = db
+        .execute("DELETE FROM entities WHERE id = ?1", params![id])
+        .map_err(|e| format!("failed to delete entity: {e}"))?;
+    if changes == 0 {
+        return Err(format!("entity #{} not found", id));
+    }
+    Ok(())
+}
+
 pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> Result<i64, String> {
     db.execute(
         "INSERT INTO relationships (source_id, target_id, type) VALUES (?1, ?2, ?3)",

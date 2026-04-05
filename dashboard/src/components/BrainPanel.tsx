@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import type { BrainStats, Entity } from '../hooks/useApi'
-import { getEntities, searchEntities, addEntity, addRelationship } from '../hooks/useApi'
+import { getEntities, searchEntities, addEntity, addRelationship, deleteEntity } from '../hooks/useApi'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -34,6 +34,11 @@ export function BrainPanel({ stats }: { stats?: BrainStats }) {
     if (!newName.trim()) return
     await addEntity(newType, newName, newProps)
     setNewName('')
+    load()
+  }
+
+  const handleDelete = async (id: number) => {
+    await deleteEntity(id)
     load()
   }
 
@@ -93,6 +98,7 @@ export function BrainPanel({ stats }: { stats?: BrainStats }) {
                   <TableHead>Name</TableHead>
                   <TableHead>Properties</TableHead>
                   <TableHead>Created</TableHead>
+                  <TableHead className="w-16"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -105,6 +111,11 @@ export function BrainPanel({ stats }: { stats?: BrainStats }) {
                       {JSON.stringify(e.properties) !== '{}' ? JSON.stringify(e.properties) : ''}
                     </TableCell>
                     <TableCell className="text-muted-foreground text-xs">{e.created_at}</TableCell>
+                    <TableCell>
+                      <Button size="sm" variant="destructive" className="h-6 px-2 text-xs" onClick={() => handleDelete(e.id)}>
+                        Delete
+                      </Button>
+                    </TableCell>
                   </TableRow>
                 ))}
               </TableBody>
