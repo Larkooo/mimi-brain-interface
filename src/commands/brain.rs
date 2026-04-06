@@ -36,7 +36,13 @@ pub fn stats() {
 pub fn query(sql: &str) {
     ensure_brain();
     let conn = db::open();
-    let rows = db::raw_query(&conn, sql);
+    let rows = match db::raw_query(&conn, sql) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if rows.is_empty() {
         println!("(no results)");
@@ -58,15 +64,25 @@ pub fn query(sql: &str) {
 pub fn add(entity_type: &str, name: &str, properties: &str) {
     ensure_brain();
     let conn = db::open();
-    let id = db::add_entity(&conn, entity_type, name, properties);
-    println!("Created entity #{}: {} ({})", id, name, entity_type);
+    match db::add_entity(&conn, entity_type, name, properties) {
+        Ok(id) => println!("Created entity #{}: {} ({})", id, name, entity_type),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
     let conn = db::open();
-    let id = db::add_relationship(&conn, source, rel, target);
-    println!("Created relationship #{}: {} --[{}]--> {}", id, source, rel, target);
+    match db::add_relationship(&conn, source, rel, target) {
+        Ok(id) => println!("Created relationship #{}: {} --[{}]--> {}", id, source, rel, target),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 pub fn search(query: &str) {
