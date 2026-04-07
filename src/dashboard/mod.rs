@@ -86,7 +86,7 @@ struct ChannelInfo {
     enabled: bool,
 }
 
-async fn api_status() -> Json<StatusResponse> {
+async fn api_status() -> Result<Json<StatusResponse>, (StatusCode, String)> {
     let config = load_config();
     let name = config.get("name").and_then(|v| v.as_str()).unwrap_or("Mimi").to_string();
     let session = config.get("session_name").and_then(|v| v.as_str()).unwrap_or("mimi");
@@ -99,7 +99,8 @@ async fn api_status() -> Json<StatusResponse> {
 
     let claude_version = crate::claude::version();
     let db = brain::open();
-    let brain_stats = brain::get_stats(&db);
+    let brain_stats = brain::get_stats(&db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
 
     let memory_files = fs::read_dir(paths::memory_dir())
         .map(|d| d.filter(|e| {
@@ -109,21 +110,23 @@ async fn api_status() -> Json<StatusResponse> {
 
     let channels = list_channels();
 
-    Json(StatusResponse {
+    Ok(Json(StatusResponse {
         name,
         session_running,
         claude_version,
         brain_stats,
         memory_files,
         channels,
-    })
+    }))
 }
 
 // --- Brain ---
 
-async fn api_brain_stats() -> Json<brain::Stats> {
+async fn api_brain_stats() -> Result<Json<brain::Stats>, (StatusCode, String)> {
     let db = brain::open();
-    Json(brain::get_stats(&db))
+    let stats = brain::get_stats(&db)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(stats))
 }
 
 #[derive(Deserialize)]
@@ -134,9 +137,11 @@ struct SearchParams {
 
 async fn api_brain_entities(
     axum::extract::Query(params): axum::extract::Query<SearchParams>,
-) -> Json<Vec<brain::Entity>> {
+) -> Result<Json<Vec<brain::Entity>>, (StatusCode, String)> {
     let db = brain::open();
-    Json(brain::find_entities(&db, params.r#type.as_deref()))
+    let entities = brain::find_entities(&db, params.r#type.as_deref())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(entities))
 }
 
 #[derive(Deserialize)]
@@ -174,10 +179,12 @@ async fn api_brain_add_relationship(
 
 async fn api_brain_search(
     axum::extract::Query(params): axum::extract::Query<SearchParams>,
-) -> Result<Json<Vec<brain::Entity>>, StatusCode> {
-    let q = params.q.ok_or(StatusCode::BAD_REQUEST)?;
+) -> Result<Json<Vec<brain::Entity>>, (StatusCode, String)> {
+    let q = params.q.ok_or((StatusCode::BAD_REQUEST, "missing 'q' parameter".to_string()))?;
     let db = brain::open();
-    Ok(Json(brain::search_entities(&db, &q)))
+    let results = brain::search_entities(&db, &q)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(results))
 }
 
 #[derive(Deserialize)]
