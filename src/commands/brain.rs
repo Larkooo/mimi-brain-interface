@@ -36,7 +36,13 @@ pub fn stats() {
 pub fn query(sql: &str) {
     ensure_brain();
     let conn = db::open();
-    let rows = db::raw_query(&conn, sql);
+    let rows = match db::raw_query(&conn, sql) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if rows.is_empty() {
         println!("(no results)");
