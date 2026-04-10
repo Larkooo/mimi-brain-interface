@@ -248,15 +248,17 @@ struct AddChannelBody {
 
 async fn api_channels_add(
     Json(body): Json<AddChannelBody>,
-) -> Json<serde_json::Value> {
-    commands::channel::add(&body.r#type);
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    commands::channel::add(&body.r#type)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     // If a token was provided, configure it immediately
     if let Some(token) = &body.token {
         if !token.is_empty() {
-            commands::channel::configure(&body.r#type, token);
+            commands::channel::configure(&body.r#type, token)
+                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
         }
     }
-    Json(serde_json::json!({ "ok": true, "channel": body.r#type }))
+    Ok(Json(serde_json::json!({ "ok": true, "channel": body.r#type })))
 }
 
 async fn api_channels_remove(
@@ -276,7 +278,8 @@ async fn api_channels_toggle(
         .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Bad config".to_string()))?;
     let enabled = config.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
     config["enabled"] = serde_json::json!(!enabled);
-    fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).ok();
+    fs::write(&path, serde_json::to_string_pretty(&config).unwrap())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to write config: {}", e)))?;
     Ok(Json(serde_json::json!({ "ok": true, "enabled": !enabled })))
 }
 
@@ -292,7 +295,8 @@ async fn api_channels_configure(
     if body.token.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "Token is required".to_string()));
     }
-    commands::channel::configure(&name, &body.token);
+    commands::channel::configure(&name, &body.token)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 

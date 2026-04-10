@@ -211,8 +211,18 @@ async fn main() {
         },
         Some(Commands::Channel { command }) => match command {
             ChannelCommands::List => commands::channel::list(),
-            ChannelCommands::Add { r#type } => commands::channel::add(&r#type),
-            ChannelCommands::Configure { r#type, token } => commands::channel::configure(&r#type, &token),
+            ChannelCommands::Add { r#type } => {
+                if let Err(e) = commands::channel::add(&r#type) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            ChannelCommands::Configure { r#type, token } => {
+                if let Err(e) = commands::channel::configure(&r#type, &token) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
             ChannelCommands::Remove { name } => commands::channel::remove(&name),
         },
         Some(Commands::Plugin { args }) => {
