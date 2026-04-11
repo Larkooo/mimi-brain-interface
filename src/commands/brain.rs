@@ -62,6 +62,17 @@ pub fn add(entity_type: &str, name: &str, properties: &str) {
     println!("Created entity #{}: {} ({})", id, name, entity_type);
 }
 
+pub fn remove(id: i64) {
+    ensure_brain();
+    let conn = db::open();
+    if db::delete_entity(&conn, id) {
+        println!("Deleted entity #{} and its relationships", id);
+    } else {
+        eprintln!("Entity #{} not found", id);
+        std::process::exit(1);
+    }
+}
+
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
     let conn = db::open();

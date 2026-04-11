@@ -60,6 +60,12 @@ pub fn add_entity(db: &Connection, entity_type: &str, name: &str, properties: &s
     db.last_insert_rowid()
 }
 
+pub fn delete_entity(db: &Connection, id: i64) -> bool {
+    let deleted = db.execute("DELETE FROM entities WHERE id = ?1", params![id])
+        .expect("failed to delete entity");
+    deleted > 0
+}
+
 pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> i64 {
     db.execute(
         "INSERT INTO relationships (source_id, target_id, type) VALUES (?1, ?2, ?3)",

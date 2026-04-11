@@ -30,6 +30,7 @@ pub async fn serve(port: u16) {
         .route("/api/brain/relationships/add", post(api_brain_add_relationship))
         .route("/api/brain/search", get(api_brain_search))
         .route("/api/brain/query", post(api_brain_query))
+        .route("/api/brain/entities/{id}", delete(api_brain_delete_entity))
         // Channels
         .route("/api/channels", get(api_channels_list))
         .route("/api/channels/add", post(api_channels_add))
@@ -194,6 +195,17 @@ async fn api_brain_query(
     }
     let db = brain::open();
     Ok(Json(brain::raw_query(&db, sql)))
+}
+
+async fn api_brain_delete_entity(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let db = brain::open();
+    if brain::delete_entity(&db, id) {
+        Ok(Json(serde_json::json!({ "ok": true, "id": id })))
+    } else {
+        Err(StatusCode::NOT_FOUND)
+    }
 }
 
 // --- Channels ---

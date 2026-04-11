@@ -94,6 +94,10 @@ export async function addRelationship(sourceId: number, type: string, targetId: 
   });
 }
 
+export async function deleteEntity(id: number) {
+  return api(`/api/brain/entities/${id}`, { method: 'DELETE' });
+}
+
 export async function runQuery(sql: string): Promise<[string, string][][]> {
   return api('/api/brain/query', {
     method: 'POST',
