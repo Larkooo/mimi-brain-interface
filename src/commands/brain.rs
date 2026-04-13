@@ -1,6 +1,16 @@
 use crate::brain as db;
 use crate::paths;
 
+fn unwrap_or_exit<T>(result: Result<T, db::BrainError>) -> T {
+    match result {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn ensure_brain() {
     if !paths::brain_db().exists() {
         eprintln!("Brain not initialized. Run `mimi setup` first.");
@@ -10,8 +20,8 @@ fn ensure_brain() {
 
 pub fn stats() {
     ensure_brain();
-    let conn = db::open();
-    let stats = db::get_stats(&conn);
+    let conn = unwrap_or_exit(db::open());
+    let stats = unwrap_or_exit(db::get_stats(&conn));
 
     println!("=== Brain Stats ===\n");
     println!("  Entities:      {}", stats.entities);
@@ -35,8 +45,8 @@ pub fn stats() {
 
 pub fn query(sql: &str) {
     ensure_brain();
-    let conn = db::open();
-    let rows = db::raw_query(&conn, sql);
+    let conn = unwrap_or_exit(db::open());
+    let rows = unwrap_or_exit(db::raw_query(&conn, sql));
 
     if rows.is_empty() {
         println!("(no results)");
@@ -57,22 +67,22 @@ pub fn query(sql: &str) {
 
 pub fn add(entity_type: &str, name: &str, properties: &str) {
     ensure_brain();
-    let conn = db::open();
-    let id = db::add_entity(&conn, entity_type, name, properties);
+    let conn = unwrap_or_exit(db::open());
+    let id = unwrap_or_exit(db::add_entity(&conn, entity_type, name, properties));
     println!("Created entity #{}: {} ({})", id, name, entity_type);
 }
 
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
-    let conn = db::open();
-    let id = db::add_relationship(&conn, source, rel, target);
+    let conn = unwrap_or_exit(db::open());
+    let id = unwrap_or_exit(db::add_relationship(&conn, source, rel, target));
     println!("Created relationship #{}: {} --[{}]--> {}", id, source, rel, target);
 }
 
 pub fn search(query: &str) {
     ensure_brain();
-    let conn = db::open();
-    let results = db::search_entities(&conn, query);
+    let conn = unwrap_or_exit(db::open());
+    let results = unwrap_or_exit(db::search_entities(&conn, query));
 
     if results.is_empty() {
         println!("No results for '{}'", query);
@@ -98,8 +108,8 @@ pub fn search(query: &str) {
 
 pub fn list(entity_type: Option<&str>) {
     ensure_brain();
-    let conn = db::open();
-    let entities = db::find_entities(&conn, entity_type);
+    let conn = unwrap_or_exit(db::open());
+    let entities = unwrap_or_exit(db::find_entities(&conn, entity_type));
 
     if entities.is_empty() {
         println!("No entities found.");

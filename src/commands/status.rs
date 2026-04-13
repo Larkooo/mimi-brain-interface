@@ -44,8 +44,20 @@ pub fn run() {
     }
 
     // Brain stats
-    let db = brain::open();
-    let stats = brain::get_stats(&db);
+    let db = match brain::open() {
+        Ok(db) => db,
+        Err(e) => {
+            println!("  Brain:    ERROR ({e})");
+            return;
+        }
+    };
+    let stats = match brain::get_stats(&db) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("  Brain:    ERROR ({e})");
+            return;
+        }
+    };
     println!("  Entities: {}", stats.entities);
     println!("  Links:    {}", stats.relationships);
     println!("  Mem refs: {}", stats.memory_refs);

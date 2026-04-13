@@ -86,7 +86,7 @@ struct ChannelInfo {
     enabled: bool,
 }
 
-async fn api_status() -> Json<StatusResponse> {
+async fn api_status() -> Result<Json<StatusResponse>, (StatusCode, String)> {
     let config = load_config();
     let name = config.get("name").and_then(|v| v.as_str()).unwrap_or("Mimi").to_string();
     let session = config.get("session_name").and_then(|v| v.as_str()).unwrap_or("mimi");
@@ -98,8 +98,8 @@ async fn api_status() -> Json<StatusResponse> {
         .unwrap_or(false);
 
     let claude_version = crate::claude::version();
-    let db = brain::open();
-    let brain_stats = brain::get_stats(&db);
+    let db = brain::open().map_err(brain_err)?;
+    let brain_stats = brain::get_stats(&db).map_err(brain_err)?;
 
     let memory_files = fs::read_dir(paths::memory_dir())
         .map(|d| d.filter(|e| {
@@ -109,21 +109,22 @@ async fn api_status() -> Json<StatusResponse> {
 
     let channels = list_channels();
 
-    Json(StatusResponse {
+    Ok(Json(StatusResponse {
         name,
         session_running,
         claude_version,
         brain_stats,
         memory_files,
         channels,
-    })
+    }))
 }
 
 // --- Brain ---
 
-async fn api_brain_stats() -> Json<brain::Stats> {
-    let db = brain::open();
-    Json(brain::get_stats(&db))
+async fn api_brain_stats() -> Result<Json<brain::Stats>, (StatusCode, String)> {
+    let db = brain::open().map_err(brain_err)?;
+    let stats = brain::get_stats(&db).map_err(brain_err)?;
+    Ok(Json(stats))
 }
 
 #[derive(Deserialize)]
@@ -134,9 +135,10 @@ struct SearchParams {
 
 async fn api_brain_entities(
     axum::extract::Query(params): axum::extract::Query<SearchParams>,
-) -> Json<Vec<brain::Entity>> {
-    let db = brain::open();
-    Json(brain::find_entities(&db, params.r#type.as_deref()))
+) -> Result<Json<Vec<brain::Entity>>, (StatusCode, String)> {
+    let db = brain::open().map_err(brain_err)?;
+    let entities = brain::find_entities(&db, params.r#type.as_deref()).map_err(brain_err)?;
+    Ok(Json(entities))
 }
 
 #[derive(Deserialize)]
@@ -152,8 +154,8 @@ fn default_props() -> String { "{}".to_string() }
 async fn api_brain_add_entity(
     Json(body): Json<AddEntityBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = brain::open();
-    let id = brain::add_entity(&db, &body.r#type, &body.name, &body.properties);
+    let db = brain::open().map_err(brain_err)?;
+    let id = brain::add_entity(&db, &body.r#type, &body.name, &body.properties).map_err(brain_err)?;
     Ok(Json(serde_json::json!({ "id": id, "name": body.name, "type": body.r#type })))
 }
 
@@ -167,17 +169,18 @@ struct AddRelBody {
 async fn api_brain_add_relationship(
     Json(body): Json<AddRelBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let db = brain::open();
-    let id = brain::add_relationship(&db, body.source_id, &body.r#type, body.target_id);
+    let db = brain::open().map_err(brain_err)?;
+    let id = brain::add_relationship(&db, body.source_id, &body.r#type, body.target_id).map_err(brain_err)?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
 
 async fn api_brain_search(
     axum::extract::Query(params): axum::extract::Query<SearchParams>,
-) -> Result<Json<Vec<brain::Entity>>, StatusCode> {
-    let q = params.q.ok_or(StatusCode::BAD_REQUEST)?;
-    let db = brain::open();
-    Ok(Json(brain::search_entities(&db, &q)))
+) -> Result<Json<Vec<brain::Entity>>, (StatusCode, String)> {
+    let q = params.q.ok_or((StatusCode::BAD_REQUEST, "missing query parameter 'q'".to_string()))?;
+    let db = brain::open().map_err(brain_err)?;
+    let results = brain::search_entities(&db, &q).map_err(brain_err)?;
+    Ok(Json(results))
 }
 
 #[derive(Deserialize)]
@@ -192,8 +195,9 @@ async fn api_brain_query(
     if !(sql.to_uppercase().starts_with("SELECT") || sql.to_uppercase().starts_with("WITH")) {
         return Err((StatusCode::BAD_REQUEST, "Only SELECT/WITH queries allowed via API".to_string()));
     }
-    let db = brain::open();
-    Ok(Json(brain::raw_query(&db, sql)))
+    let db = brain::open().map_err(brain_err)?;
+    let rows = brain::raw_query(&db, sql).map_err(brain_err)?;
+    Ok(Json(rows))
 }
 
 // --- Channels ---
@@ -338,6 +342,10 @@ async fn api_backup() -> Json<serde_json::Value> {
 }
 
 // --- Helpers ---
+
+fn brain_err(e: brain::BrainError) -> (StatusCode, String) {
+    (StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+}
 
 fn load_config() -> serde_json::Value {
     fs::read_to_string(paths::config_file())

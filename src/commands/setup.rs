@@ -13,8 +13,13 @@ pub fn run() {
 
     // Initialize brain
     if !paths::brain_db().exists() {
-        brain::init();
-        println!("  Initialized brain.db");
+        match brain::init() {
+            Ok(_) => println!("  Initialized brain.db"),
+            Err(e) => {
+                eprintln!("  Failed to initialize brain.db: {e}");
+                std::process::exit(1);
+            }
+        }
     } else {
         println!("  brain.db already exists");
     }
