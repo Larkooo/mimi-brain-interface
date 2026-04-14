@@ -10,12 +10,12 @@ fn run_claude(args: &[&str]) {
     }
 }
 
-fn run_claude_output(args: &[&str]) -> String {
+fn try_run_claude_output(args: &[&str]) -> Result<String, String> {
     let output = Command::new("claude")
         .args(args)
         .output()
-        .expect("failed to run claude — is it installed?");
-    String::from_utf8_lossy(&output.stdout).to_string()
+        .map_err(|e| format!("failed to run claude: {e}"))?;
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
 pub fn mcp(args: &[&str]) {
@@ -35,13 +35,14 @@ pub fn plugin_install(plugin_name: &str) {
     run_claude(&["plugin", "install", plugin_name]);
 }
 
-/// List installed plugins
-pub fn plugin_list_output() -> String {
-    run_claude_output(&["plugin", "list"])
+/// List installed plugins (fallible, safe for server use)
+pub fn plugin_list_output() -> Result<String, String> {
+    try_run_claude_output(&["plugin", "list"])
 }
 
-/// Launch claude in a tmux session with optional channels
-pub fn launch_tmux(session_name: &str, channels: &[String]) {
+/// Launch claude in a tmux session with optional channels.
+/// Returns Ok on success, Err with a message on failure.
+pub fn launch_tmux(session_name: &str, channels: &[String]) -> Result<(), String> {
     let mimi_home = crate::paths::home();
 
     // Kill existing session
@@ -68,21 +69,18 @@ pub fn launch_tmux(session_name: &str, channels: &[String]) {
             &claude_cmd,
         ])
         .status()
-        .expect("failed to start tmux — is it installed?");
+        .map_err(|e| format!("failed to start tmux: {e}"))?;
 
     if status.success() {
-        println!("Mimi is alive in tmux session '{session_name}'");
-        if !channels.is_empty() {
-            println!("Channels: {}", channels.join(", "));
-        }
-        println!("Attach with: tmux attach -t {session_name}");
+        Ok(())
     } else {
-        eprintln!("Failed to start tmux session");
-        std::process::exit(1);
+        Err("tmux session creation failed".to_string())
     }
 }
 
-/// Get claude version
+/// Get claude version (returns "unknown" if claude is not available)
 pub fn version() -> String {
-    run_claude_output(&["--version"]).trim().to_string()
+    try_run_claude_output(&["--version"])
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string())
 }
