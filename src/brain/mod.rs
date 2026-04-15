@@ -47,26 +47,25 @@ pub fn init() -> Connection {
     db
 }
 
-pub fn add_entity(db: &Connection, entity_type: &str, name: &str, properties: &str) -> i64 {
-    // Validate JSON
+pub fn add_entity(db: &Connection, entity_type: &str, name: &str, properties: &str) -> Result<i64, String> {
     let _: serde_json::Value =
-        serde_json::from_str(properties).expect("invalid JSON for properties");
+        serde_json::from_str(properties).map_err(|e| format!("invalid JSON for properties: {e}"))?;
 
     db.execute(
         "INSERT INTO entities (type, name, properties) VALUES (?1, ?2, ?3)",
         params![entity_type, name, properties],
     )
-    .expect("failed to insert entity");
-    db.last_insert_rowid()
+    .map_err(|e| format!("failed to insert entity: {e}"))?;
+    Ok(db.last_insert_rowid())
 }
 
-pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> i64 {
+pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> Result<i64, String> {
     db.execute(
         "INSERT INTO relationships (source_id, target_id, type) VALUES (?1, ?2, ?3)",
         params![source, target, rel_type],
     )
-    .expect("failed to insert relationship");
-    db.last_insert_rowid()
+    .map_err(|e| format!("failed to insert relationship: {e}"))?;
+    Ok(db.last_insert_rowid())
 }
 
 pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Vec<Entity> {
@@ -140,8 +139,8 @@ pub fn get_stats(db: &Connection) -> Stats {
     }
 }
 
-pub fn raw_query(db: &Connection, sql: &str) -> Vec<Vec<(String, String)>> {
-    let mut stmt = db.prepare(sql).expect("invalid SQL");
+pub fn raw_query(db: &Connection, sql: &str) -> Result<Vec<Vec<(String, String)>>, String> {
+    let mut stmt = db.prepare(sql).map_err(|e| format!("invalid SQL: {e}"))?;
     let col_count = stmt.column_count();
     let col_names: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
@@ -162,9 +161,9 @@ pub fn raw_query(db: &Connection, sql: &str) -> Vec<Vec<(String, String)>> {
             }
             Ok(cols)
         })
-        .expect("query failed");
+        .map_err(|e| format!("query failed: {e}"))?;
 
-    rows.filter_map(|r| r.ok()).collect()
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 fn row_to_entity(row: &rusqlite::Row) -> rusqlite::Result<Entity> {
