@@ -38,7 +38,22 @@ pub struct Stats {
 pub fn open() -> Connection {
     let db = Connection::open(paths::brain_db()).expect("failed to open brain.db");
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").ok();
+    migrate(&db);
     db
+}
+
+/// Apply schema migrations that may be missing from older databases.
+/// Each statement uses IF NOT EXISTS so it's safe to run repeatedly.
+fn migrate(db: &Connection) {
+    db.execute_batch(
+        "CREATE TRIGGER IF NOT EXISTS entities_update_timestamp \
+         AFTER UPDATE ON entities \
+         FOR EACH ROW \
+         WHEN NEW.updated_at = OLD.updated_at \
+         BEGIN \
+             UPDATE entities SET updated_at = datetime('now') WHERE id = NEW.id; \
+         END;"
+    ).ok();
 }
 
 pub fn init() -> Connection {
