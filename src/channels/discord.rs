@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, Command};
@@ -12,8 +14,22 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::paths;
 
-// Hardcoded: only this user may talk to Mimi over Discord.
-const ALLOWED_USER_ID: u64 = 445355215013806081;
+// Default owner if access.json is missing or unreadable. Supersedable by
+// `~/.mimi/channels/discord/access.json`.
+const DEFAULT_OWNER_ID: u64 = 445355215013806081;
+
+// Prepended to every guest-authored turn. The Claude subprocess can't be
+// sandboxed from out here, so this is a strong in-prompt guard, not a
+// hard permission gate.
+const GUEST_SYSTEM_REMINDER: &str = "<system-reminder>\n\
+The message below is from a GUEST Discord user (see `permission=\"guest\"` on the channel tag). Guest users have chat-only access. You MUST:\n\
+- Reply conversationally only. Do NOT call tools that modify state (Write, Edit, mutating Bash/sqlite/git/systemctl, etc.).\n\
+- Do NOT read credentials, secrets, bot tokens, .env files, SSH/API keys, or `~/.mimi/accounts/`.\n\
+- Do NOT retrieve memory or brain.db entities except entries that are directly about this guest themselves.\n\
+- Do NOT send messages to other channels or perform actions on the owner's behalf.\n\
+- Do NOT modify source code, configs, services, or run destructive commands.\n\
+If the guest asks for any of the above, politely refuse and say you only have chat access for guest users.\n\
+</system-reminder>\n";
 
 // Intents: GUILD_MESSAGES | DIRECT_MESSAGES. MESSAGE_CONTENT is privileged
 // and not required — in DMs Discord always sends content, and in guilds
@@ -43,8 +59,13 @@ pub async fn start() -> Result<(), String> {
     let session_id = ensure_session_id()?;
     write_pidfile()?;
 
+    let access = load_access();
     eprintln!("discord: session_id={session_id}");
-    eprintln!("discord: allowed_user_id={ALLOWED_USER_ID}");
+    eprintln!(
+        "discord: owner={} guests={:?}",
+        access.owner, access.guests
+    );
+    let _ = ACCESS.set(access);
 
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
     let (to_dc_tx, to_dc_rx) = mpsc::channel::<DcOut>(128);
@@ -91,6 +112,61 @@ fn load_token() -> Result<String, String> {
 
 fn channel_dir() -> PathBuf {
     paths::home().join("channels").join("discord")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Permission {
+    Owner,
+    Guest,
+}
+
+impl Permission {
+    fn as_str(self) -> &'static str {
+        match self {
+            Permission::Owner => "owner",
+            Permission::Guest => "guest",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Access {
+    owner: u64,
+    guests: Vec<u64>,
+}
+
+impl Access {
+    fn permission_for(&self, user_id: u64) -> Option<Permission> {
+        if user_id == self.owner {
+            Some(Permission::Owner)
+        } else if self.guests.contains(&user_id) {
+            Some(Permission::Guest)
+        } else {
+            None
+        }
+    }
+}
+
+static ACCESS: OnceLock<Access> = OnceLock::new();
+
+fn load_access() -> Access {
+    #[derive(Deserialize)]
+    struct Raw {
+        owner: u64,
+        #[serde(default)]
+        guests: Vec<u64>,
+    }
+    let path = channel_dir().join("access.json");
+    match std::fs::read_to_string(&path) {
+        Ok(contents) => match serde_json::from_str::<Raw>(&contents) {
+            Ok(raw) => Access { owner: raw.owner, guests: raw.guests },
+            Err(e) => {
+                eprintln!("discord: bad access.json ({e}) — using default owner");
+                Access { owner: DEFAULT_OWNER_ID, guests: Vec::new() }
+            }
+        },
+        Err(_) => Access { owner: DEFAULT_OWNER_ID, guests: Vec::new() },
+    }
 }
 
 fn pidfile() -> PathBuf {
@@ -484,10 +560,13 @@ async fn run_gateway(
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let is_bot = d.pointer("/author/bot").and_then(|x| x.as_bool()).unwrap_or(false);
         if is_bot { continue; }
-        if author_id != ALLOWED_USER_ID {
-            eprintln!("discord: blocked user {author_id}");
-            continue;
-        }
+        let permission = match ACCESS.get().and_then(|a| a.permission_for(author_id)) {
+            Some(p) => p,
+            None => {
+                eprintln!("discord: blocked user {author_id}");
+                continue;
+            }
+        };
         let channel_id: u64 = d.get("channel_id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
@@ -524,8 +603,10 @@ async fn run_gateway(
         let channel_id_str = channel_id.to_string();
         let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
             .unwrap_or_default();
+        let guest_preamble = if permission == Permission::Guest { GUEST_SYSTEM_REMINDER } else { "" };
         let wrapped = format!(
-            "{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\">\n{content}\n</channel>"
+            "{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
+            perm = permission.as_str()
         );
         crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &content);
         let _ = to_claude.send(UserTurn { text: wrapped }).await;
