@@ -48,11 +48,17 @@ The message below is from a STRICT_GUEST Discord user (see `permission=\"strict_
 - If the guest asks for anything above, refuse in one short sentence and do not elaborate on why beyond \"restricted access\".\n\
 </system-reminder>\n";
 
-// Intents: GUILD_MESSAGES | DIRECT_MESSAGES. MESSAGE_CONTENT is privileged
-// and not required — in DMs Discord always sends content, and in guilds
-// content is provided whenever the bot is @mentioned or replied to, which
-// are the only cases we react to.
-const INTENTS: u64 = (1 << 9) | (1 << 12);
+// Intents: GUILDS, GUILD_MESSAGES, GUILD_MESSAGE_REACTIONS, DIRECT_MESSAGES,
+// DIRECT_MESSAGE_REACTIONS, MESSAGE_CONTENT (privileged). MESSAGE_CONTENT
+// is enabled so the REST API populates `content` for non-mention messages,
+// which we use for historical channel analysis (style profiling, etc.).
+// Privileged intent must also be toggled on in the Discord developer portal.
+const INTENTS: u64 = (1 << 0)   // GUILDS
+    | (1 << 9)                  // GUILD_MESSAGES
+    | (1 << 10)                 // GUILD_MESSAGE_REACTIONS
+    | (1 << 12)                 // DIRECT_MESSAGES
+    | (1 << 13)                 // DIRECT_MESSAGE_REACTIONS
+    | (1 << 15);                // MESSAGE_CONTENT (privileged)
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const EDIT_THROTTLE_MS: u64 = 1500;
@@ -327,8 +333,14 @@ async fn read_claude(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<DcOut
                 }
             }
             "assistant" => {
+                // Each assistant message with text is a distinct Discord post —
+                // finalize now so the next text block starts a fresh message
+                // (push-notifies the user) instead of silently editing the prior.
                 if let Some(text) = extract_full_text(&v) {
-                    accumulated = text;
+                    if !text.trim().is_empty() {
+                        let _ = tx.send(DcOut::Finalize { text }).await;
+                        accumulated.clear();
+                    }
                 }
             }
             "result" => {
