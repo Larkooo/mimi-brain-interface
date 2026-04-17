@@ -93,6 +93,10 @@ pub fn new(title: &str, spawner: &str) -> Result<Task, String> {
     Ok(task)
 }
 
+// NOTE: save() is a read-modify-write replace without locking. Safe under the
+// intended use (single spawner owns a task), racy if two writers hit the same
+// id — last write wins. If we ever spawn concurrent updaters per task, swap
+// to write-to-tmp + rename and a file lock.
 pub fn save(task: &Task) -> Result<(), String> {
     paths::ensure_dirs();
     let json = serde_json::to_string_pretty(task).map_err(|e| e.to_string())?;

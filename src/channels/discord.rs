@@ -279,7 +279,13 @@ async fn discord_writer(
                     } else {
                         let _ = send_message(&client, &token, chan, &text).await;
                     }
-                    crate::context_buffer::append_assistant("discord", &chan.to_string(), &text);
+                    if !text.trim().is_empty() {
+                        crate::context_buffer::append_assistant(
+                            "discord",
+                            &chan.to_string(),
+                            &text,
+                        );
+                    }
                 }
                 pending = None;
                 last_sent_text.clear();

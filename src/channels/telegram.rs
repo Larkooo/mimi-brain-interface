@@ -281,11 +281,13 @@ async fn telegram_writer(
                 let chat_id = ACTIVE_CHAT.load(Ordering::SeqCst);
                 if chat_id != 0 {
                     let _ = send_message(&client, &token, chat_id, &text).await;
-                    crate::context_buffer::append_assistant(
-                        "telegram",
-                        &chat_id.to_string(),
-                        &text,
-                    );
+                    if !text.trim().is_empty() {
+                        crate::context_buffer::append_assistant(
+                            "telegram",
+                            &chat_id.to_string(),
+                            &text,
+                        );
+                    }
                 }
                 pending = None;
                 last_draft_text.clear();
