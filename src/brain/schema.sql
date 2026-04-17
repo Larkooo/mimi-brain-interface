@@ -32,6 +32,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS entities_fts USING fts5(
     content=entities, content_rowid=id
 );
 
+-- Auto-update the updated_at timestamp when an entity is modified
+-- The WHEN clause prevents the trigger from re-firing on its own UPDATE
+CREATE TRIGGER IF NOT EXISTS entities_update_timestamp
+AFTER UPDATE ON entities
+FOR EACH ROW
+WHEN NEW.updated_at = OLD.updated_at
+BEGIN
+    UPDATE entities SET updated_at = datetime('now') WHERE id = NEW.id;
+END;
+
 -- Keep FTS in sync
 CREATE TRIGGER IF NOT EXISTS entities_ai AFTER INSERT ON entities BEGIN
     INSERT INTO entities_fts(rowid, name, type, properties)
