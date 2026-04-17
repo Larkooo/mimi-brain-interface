@@ -1,4 +1,5 @@
 mod brain;
+mod channels;
 mod claude;
 mod commands;
 mod dashboard;
@@ -144,6 +145,11 @@ enum ChannelCommands {
         /// Bot token
         token: String,
     },
+    /// Start a channel bot in the foreground (bridges Telegram ↔ a persistent claude session)
+    Start {
+        /// Channel type (currently only "telegram")
+        r#type: String,
+    },
     /// Remove a channel
     Remove {
         /// Channel name
@@ -227,6 +233,16 @@ async fn main() {
             }
             ChannelCommands::Configure { r#type, token } => {
                 if let Err(e) = commands::channel::configure(&r#type, &token) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            ChannelCommands::Start { r#type } => {
+                let result = match r#type.as_str() {
+                    "telegram" => channels::telegram::start().await,
+                    other => Err(format!("unknown or unsupported channel: {other}")),
+                };
+                if let Err(e) = result {
                     eprintln!("Error: {}", e);
                     std::process::exit(1);
                 }
