@@ -6,5 +6,6 @@ pub mod config;
 pub mod dashboard;
 pub mod launch;
 pub mod reflect;
+pub mod secret;
 pub mod setup;
 pub mod status;

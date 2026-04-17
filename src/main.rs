@@ -54,6 +54,11 @@ enum Commands {
     Reflect,
     /// Audit own codebase and propose improvements via PR
     Audit,
+    /// Manage encrypted secrets (isolated vault)
+    Secret {
+        #[command(subcommand)]
+        command: SecretCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -132,6 +137,36 @@ enum ChannelCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum SecretCommands {
+    /// Store an encrypted secret
+    Set {
+        /// Secret name
+        name: String,
+        /// Secret value
+        value: String,
+    },
+    /// List stored secrets (names only, never values)
+    List,
+    /// Delete a secret
+    Delete {
+        /// Secret name
+        name: String,
+    },
+    /// Run a command with a secret injected as an env var
+    Run {
+        /// Secret name
+        name: String,
+        /// Environment variable name to inject
+        env_var: String,
+        /// Command and arguments to run
+        #[arg(trailing_var_arg = true)]
+        cmd: Vec<String>,
+    },
+    /// One-time setup: create vault user and directories
+    Setup,
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -180,5 +215,14 @@ async fn main() {
         Some(Commands::Backup) => commands::backup::run(),
         Some(Commands::Reflect) => commands::reflect::run(),
         Some(Commands::Audit) => commands::audit::run(),
+        Some(Commands::Secret { command }) => match command {
+            SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
+            SecretCommands::List => commands::secret::list(),
+            SecretCommands::Delete { name } => commands::secret::delete(&name),
+            SecretCommands::Run { name, env_var, cmd } => {
+                commands::secret::run(&name, &env_var, &cmd);
+            }
+            SecretCommands::Setup => commands::secret::setup_vault(),
+        },
     }
 }
