@@ -167,6 +167,73 @@ pub fn get_stats(db: &Connection) -> Result<Stats, String> {
     })
 }
 
+#[derive(Debug, Serialize)]
+pub struct GraphNode {
+    pub id: i64,
+    pub name: String,
+    pub r#type: String,
+    pub properties: serde_json::Value,
+    pub connections: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphLink {
+    pub source: i64,
+    pub target: i64,
+    pub r#type: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GraphData {
+    pub nodes: Vec<GraphNode>,
+    pub links: Vec<GraphLink>,
+}
+
+pub fn get_graph(db: &Connection) -> Result<GraphData, String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT e.id, e.name, e.type, e.properties, \
+             (SELECT COUNT(*) FROM relationships WHERE source_id = e.id OR target_id = e.id) AS connections \
+             FROM entities e ORDER BY connections DESC",
+        )
+        .map_err(|e| format!("failed to prepare graph node query: {e}"))?;
+
+    let nodes: Vec<GraphNode> = stmt
+        .query_map([], |row| {
+            let props_str: String = row.get(3)?;
+            let properties = serde_json::from_str(&props_str)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            Ok(GraphNode {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                r#type: row.get(2)?,
+                properties,
+                connections: row.get(4)?,
+            })
+        })
+        .map_err(|e| format!("graph node query failed: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut stmt = db
+        .prepare("SELECT source_id, target_id, type FROM relationships")
+        .map_err(|e| format!("failed to prepare graph link query: {e}"))?;
+
+    let links: Vec<GraphLink> = stmt
+        .query_map([], |row| {
+            Ok(GraphLink {
+                source: row.get(0)?,
+                target: row.get(1)?,
+                r#type: row.get(2)?,
+            })
+        })
+        .map_err(|e| format!("graph link query failed: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(GraphData { nodes, links })
+}
+
 pub fn raw_query(db: &Connection, sql: &str) -> Result<Vec<Vec<(String, String)>>, String> {
     let mut stmt = db.prepare(sql).map_err(|e| format!("invalid SQL: {e}"))?;
     let col_count = stmt.column_count();
