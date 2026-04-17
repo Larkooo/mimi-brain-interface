@@ -343,8 +343,7 @@ async fn api_config_set(
 async fn api_session_launch() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let config = load_config();
     let session = config.get("session_name").and_then(|v| v.as_str()).unwrap_or("mimi");
-    let channels = commands::channel::enabled_channel_flags();
-    crate::claude::launch_tmux(session, &channels)
+    crate::claude::launch_tmux(session)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "ok": true, "session": session })))
 }

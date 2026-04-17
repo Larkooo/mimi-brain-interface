@@ -40,23 +40,17 @@ pub fn plugin_list_output() -> Result<String, String> {
     try_run_claude_output(&["plugin", "list"])
 }
 
-/// Launch claude in a tmux session with optional channels.
-/// Returns Ok on success, Err with a message on failure.
-pub fn launch_tmux(session_name: &str, channels: &[String]) -> Result<(), String> {
+/// Launch an interactive claude in a tmux session.
+/// Channels run out-of-process — use `mimi channel start <name>` for those.
+pub fn launch_tmux(session_name: &str) -> Result<(), String> {
     let mimi_home = crate::paths::home();
 
-    // Kill existing session
     Command::new("tmux")
         .args(["kill-session", "-t", session_name])
         .output()
         .ok();
 
-    // Build the claude command string
-    // Mimi runs with full permissions — she manages herself
-    let mut claude_cmd = "claude --resume --dangerously-skip-permissions".to_string();
-    for channel in channels {
-        claude_cmd.push_str(&format!(" --channels {}", channel));
-    }
+    let claude_cmd = "claude --resume --dangerously-skip-permissions";
 
     let status = Command::new("tmux")
         .args([
@@ -66,7 +60,7 @@ pub fn launch_tmux(session_name: &str, channels: &[String]) -> Result<(), String
             session_name,
             "-c",
             mimi_home.to_str().unwrap(),
-            &claude_cmd,
+            claude_cmd,
         ])
         .status()
         .map_err(|e| format!("failed to start tmux: {e}"))?;

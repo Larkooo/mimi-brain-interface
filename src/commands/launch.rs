@@ -1,5 +1,4 @@
 use crate::paths;
-use crate::commands::channel;
 
 pub fn run() {
     if !paths::brain_db().exists() {
@@ -13,13 +12,9 @@ pub fn run() {
         .and_then(|v| v.as_str())
         .unwrap_or("mimi");
 
-    let channels = channel::enabled_channel_flags();
-    match crate::claude::launch_tmux(session_name, &channels) {
+    match crate::claude::launch_tmux(session_name) {
         Ok(()) => {
             println!("Mimi is alive in tmux session '{session_name}'");
-            if !channels.is_empty() {
-                println!("Channels: {}", channels.join(", "));
-            }
             println!("Attach with: tmux attach -t {session_name}");
         }
         Err(e) => {

@@ -150,6 +150,11 @@ enum ChannelCommands {
         /// Channel type (currently only "telegram")
         r#type: String,
     },
+    /// Stop a running channel bot (reads pidfile, sends SIGTERM)
+    Stop {
+        /// Channel type (currently only "telegram")
+        r#type: String,
+    },
     /// Remove a channel
     Remove {
         /// Channel name
@@ -240,6 +245,16 @@ async fn main() {
             ChannelCommands::Start { r#type } => {
                 let result = match r#type.as_str() {
                     "telegram" => channels::telegram::start().await,
+                    other => Err(format!("unknown or unsupported channel: {other}")),
+                };
+                if let Err(e) = result {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            ChannelCommands::Stop { r#type } => {
+                let result = match r#type.as_str() {
+                    "telegram" => channels::telegram::stop(),
                     other => Err(format!("unknown or unsupported channel: {other}")),
                 };
                 if let Err(e) = result {

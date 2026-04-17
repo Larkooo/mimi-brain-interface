@@ -59,7 +59,7 @@ pub fn list() {
         println!("  {}", name);
     }
 
-    println!("\nEnabled channels will be passed as --channels to Claude Code on launch.");
+    println!("\nStart a channel bot with: mimi channel start <type>");
 }
 
 pub fn add(channel_type: &str) -> Result<(), String> {
@@ -166,32 +166,3 @@ pub fn remove(name: &str) {
     }
 }
 
-/// Get the list of --channels flags for enabled channels
-pub fn enabled_channel_flags() -> Vec<String> {
-    let dir = paths::channels_dir();
-    if !dir.exists() {
-        return vec![];
-    }
-
-    let mut flags = vec![];
-    for entry in fs::read_dir(&dir).into_iter().flatten().flatten() {
-        if entry.path().extension().is_some_and(|ext| ext == "json") {
-            if let Ok(content) = fs::read_to_string(entry.path()) {
-                if let Ok(config) = serde_json::from_str::<serde_json::Value>(&content) {
-                    let enabled = config
-                        .get("enabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                    if enabled {
-                        if let Some(plugin) = config.get("plugin").and_then(|v| v.as_str()) {
-                            if !plugin.is_empty() {
-                                flags.push(format!("plugin:{}", plugin));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    flags
-}

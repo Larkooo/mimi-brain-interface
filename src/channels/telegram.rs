@@ -20,6 +20,7 @@ pub async fn start() -> Result<(), String> {
     let token = load_token()?;
     let allowlist = load_allowlist();
     let session_id = ensure_session_id()?;
+    write_pidfile()?;
 
     eprintln!("telegram: session_id={session_id}");
     eprintln!("telegram: allowlist={:?}", allowlist);
@@ -75,6 +76,37 @@ fn load_allowlist() -> Option<HashSet<i64>> {
 
 fn channel_dir() -> PathBuf {
     paths::home().join("channels").join("telegram")
+}
+
+fn pidfile() -> PathBuf {
+    channel_dir().join("pid")
+}
+
+fn write_pidfile() -> Result<(), String> {
+    let dir = channel_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = pidfile();
+    let pid = std::process::id();
+    std::fs::write(&path, pid.to_string()).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
+}
+
+/// Send SIGTERM to a running telegram bot (reads pid from ~/.mimi/channels/telegram/pid).
+pub fn stop() -> Result<(), String> {
+    let path = pidfile();
+    let pid_str = std::fs::read_to_string(&path)
+        .map_err(|e| format!("no running bot (missing {}): {e}", path.display()))?;
+    let pid: i32 = pid_str
+        .trim()
+        .parse()
+        .map_err(|e| format!("bad pid in {}: {e}", path.display()))?;
+    let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(format!("kill({pid}, SIGTERM) failed: errno {}", std::io::Error::last_os_error()));
+    }
+    let _ = std::fs::remove_file(&path);
+    eprintln!("telegram: SIGTERM sent to {pid}");
+    Ok(())
 }
 
 fn ensure_session_id() -> Result<String, String> {
