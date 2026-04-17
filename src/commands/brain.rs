@@ -11,7 +11,13 @@ fn ensure_brain() {
 pub fn stats() {
     ensure_brain();
     let conn = db::open();
-    let stats = db::get_stats(&conn);
+    let stats = match db::get_stats(&conn) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     println!("=== Brain Stats ===\n");
     println!("  Entities:      {}", stats.entities);
@@ -90,7 +96,13 @@ pub fn link(source: i64, rel: &str, target: i64) {
 pub fn search(query: &str) {
     ensure_brain();
     let conn = db::open();
-    let results = db::search_entities(&conn, query);
+    let results = match db::search_entities(&conn, query) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if results.is_empty() {
         println!("No results for '{}'", query);
@@ -117,7 +129,13 @@ pub fn search(query: &str) {
 pub fn list(entity_type: Option<&str>) {
     ensure_brain();
     let conn = db::open();
-    let entities = db::find_entities(&conn, entity_type);
+    let entities = match db::find_entities(&conn, entity_type) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
 
     if entities.is_empty() {
         println!("No entities found.");
