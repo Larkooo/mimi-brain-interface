@@ -162,6 +162,7 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
             "--include-partial-messages",
             "--verbose",
             "--session-id", session_id,
+            "--model", "claude-haiku-4-5-20251001",
             "--dangerously-skip-permissions",
         ])
         .current_dir(&cwd)
@@ -485,9 +486,15 @@ async fn run_gateway(
         let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if content.is_empty() || channel_id == 0 { continue; }
 
+        let guild_id: Option<u64> = d.get("guild_id").and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok());
+        let user_name = d.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let message_id: u64 = d.get("id").and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok()).unwrap_or(0);
+
         // Guild messages: only respond if the bot is @mentioned or the
         // message is a reply to one of the bot's messages.
-        let in_guild = d.get("guild_id").is_some();
+        let in_guild = guild_id.is_some();
         if in_guild {
             let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
             let mentioned = d.get("mentions").and_then(|x| x.as_array())
@@ -505,7 +512,12 @@ async fn run_gateway(
         ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
         TYPING_ACTIVE.store(true, Ordering::SeqCst);
         tokio::spawn(typing_loop(client.clone(), token.to_string(), channel_id));
-        let _ = to_claude.send(UserTurn { text: content }).await;
+
+        let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
+        let wrapped = format!(
+            "<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\">\n{content}\n</channel>"
+        );
+        let _ = to_claude.send(UserTurn { text: wrapped }).await;
     }
 
     hb_task.abort();
