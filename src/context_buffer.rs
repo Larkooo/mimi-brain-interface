@@ -11,9 +11,10 @@
 //! here is tiny (a handful of lines per minute) so lock contention is a
 //! non-issue.
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,8 +24,14 @@ use crate::paths;
 const MAX_LINES: usize = 200;
 const CONTEXT_LOOKBACK: usize = 20;
 const SAME_CHANNEL_WINDOW_SECS: i64 = 60;
+const FIRST_TURN_LOOKBACK: usize = 40;
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+fn seen_channels() -> &'static Mutex<HashSet<String>> {
+    static INSTANCE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    INSTANCE.get_or_init(|| Mutex::new(HashSet::new()))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
@@ -114,22 +121,34 @@ pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<Strin
     let entries = recent();
     let now = Utc::now();
 
+    // After a binary restart, the claude subprocess loses its in-memory
+    // conversation state. On the first turn seen per (source, chat_id) since
+    // this process started, surface the full rolling log for that channel so
+    // mimi can pick up the conversation instead of waking up amnesiac.
+    let key = format!("{current_source}:{current_chat_id}");
+    let is_first_turn = seen_channels()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(key);
+    let lookback = if is_first_turn { FIRST_TURN_LOOKBACK } else { CONTEXT_LOOKBACK };
+
     let mut picks: Vec<&Entry> = entries
         .iter()
         .rev()
         .filter(|e| {
             let same_channel = e.source == current_source && e.chat_id == current_chat_id;
             if same_channel {
-                // Skip same-channel history unless it's very recent — the
-                // claude subprocess already has its own conversation memory
-                // for its own channel; we only want to surface cross-channel
-                // or brand-new context here.
-                (now - e.ts).num_seconds() < SAME_CHANNEL_WINDOW_SECS
+                // On the first turn after a restart, include same-channel
+                // history so we recover the rolling log. Otherwise skip it —
+                // the subprocess already holds its own conversation state and
+                // the preamble's job is cross-channel awareness.
+                is_first_turn
+                    || (now - e.ts).num_seconds() < SAME_CHANNEL_WINDOW_SECS
             } else {
                 true
             }
         })
-        .take(CONTEXT_LOOKBACK)
+        .take(lookback)
         .collect();
     picks.reverse();
 
