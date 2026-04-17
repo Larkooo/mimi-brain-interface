@@ -72,5 +72,8 @@ pub fn run() {
     // Step 3: Relaunch Mimi with a fresh context
     println!("Relaunching Mimi with fresh context...");
     let channels = channel::enabled_channel_flags();
-    crate::claude::launch_tmux(session, &channels);
+    if let Err(e) = crate::claude::launch_tmux(session, &channels) {
+        eprintln!("Failed to relaunch: {e}");
+        std::process::exit(1);
+    }
 }

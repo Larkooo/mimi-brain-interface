@@ -14,7 +14,19 @@ pub fn run() {
         .unwrap_or("mimi");
 
     let channels = channel::enabled_channel_flags();
-    crate::claude::launch_tmux(session_name, &channels);
+    match crate::claude::launch_tmux(session_name, &channels) {
+        Ok(()) => {
+            println!("Mimi is alive in tmux session '{session_name}'");
+            if !channels.is_empty() {
+                println!("Channels: {}", channels.join(", "));
+            }
+            println!("Attach with: tmux attach -t {session_name}");
+        }
+        Err(e) => {
+            eprintln!("Failed to launch: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn load_config() -> serde_json::Value {

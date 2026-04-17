@@ -318,12 +318,13 @@ async fn api_config_set(
 
 // --- Session ---
 
-async fn api_session_launch() -> Json<serde_json::Value> {
+async fn api_session_launch() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let config = load_config();
     let session = config.get("session_name").and_then(|v| v.as_str()).unwrap_or("mimi");
     let channels = commands::channel::enabled_channel_flags();
-    crate::claude::launch_tmux(session, &channels);
-    Json(serde_json::json!({ "ok": true, "session": session }))
+    crate::claude::launch_tmux(session, &channels)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "ok": true, "session": session })))
 }
 
 async fn api_session_stop() -> Json<serde_json::Value> {
@@ -339,9 +340,10 @@ async fn api_session_stop() -> Json<serde_json::Value> {
 
 // --- MCP ---
 
-async fn api_mcp_list() -> Json<serde_json::Value> {
-    let output = crate::claude::plugin_list_output();
-    Json(serde_json::json!({ "output": output }))
+async fn api_mcp_list() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let output = crate::claude::plugin_list_output()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({ "output": output })))
 }
 
 // --- Backup ---
