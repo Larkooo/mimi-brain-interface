@@ -130,6 +130,13 @@ enum ChannelCommands {
         /// Channel type (telegram, imessage, etc.)
         r#type: String,
     },
+    /// Configure a channel with a bot token
+    Configure {
+        /// Channel type (telegram, discord, etc.)
+        r#type: String,
+        /// Bot token
+        token: String,
+    },
     /// Remove a channel
     Remove {
         /// Channel name
@@ -205,6 +212,7 @@ async fn main() {
         Some(Commands::Channel { command }) => match command {
             ChannelCommands::List => commands::channel::list(),
             ChannelCommands::Add { r#type } => commands::channel::add(&r#type),
+            ChannelCommands::Configure { r#type, token } => commands::channel::configure(&r#type, &token),
             ChannelCommands::Remove { name } => commands::channel::remove(&name),
         },
         Some(Commands::Plugin { args }) => {
