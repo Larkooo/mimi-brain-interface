@@ -28,7 +28,7 @@ pub async fn start() -> Result<(), String> {
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
     let (to_tg_tx, to_tg_rx) = mpsc::channel::<TgOut>(128);
 
-    let mut claude = spawn_claude(&session_id).await?;
+    let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
     let stdout = claude.stdout.take().ok_or("claude stdout not piped")?;
     tokio::spawn(async move {
@@ -125,6 +125,19 @@ fn ensure_session_id() -> Result<String, String> {
 }
 
 // --- Claude subprocess ---
+
+async fn spawn_claude_with_retry(session_id: &str) -> Result<tokio::process::Child, String> {
+    let mut child = spawn_claude(session_id).await?;
+    tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+    if let Ok(Some(status)) = child.try_wait() {
+        eprintln!("telegram: claude exited {status} on first spawn — rotating session_id");
+        let new_id = uuid::Uuid::new_v4().to_string();
+        std::fs::write(channel_dir().join("session_id"), &new_id)
+            .map_err(|e| format!("write session_id: {e}"))?;
+        return spawn_claude(&new_id).await;
+    }
+    Ok(child)
+}
 
 async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String> {
     let cwd = paths::home();
