@@ -281,6 +281,11 @@ async fn telegram_writer(
                 let chat_id = ACTIVE_CHAT.load(Ordering::SeqCst);
                 if chat_id != 0 {
                     let _ = send_message(&client, &token, chat_id, &text).await;
+                    crate::context_buffer::append_assistant(
+                        "telegram",
+                        &chat_id.to_string(),
+                        &text,
+                    );
                 }
                 pending = None;
                 last_draft_text.clear();
@@ -428,6 +433,12 @@ async fn telegram_reader(
             Some(r) => r,
             None => {
                 eprintln!("telegram: unexpected response: {body}");
+                let wait = if body.get("error_code").and_then(|x| x.as_i64()) == Some(409) {
+                    35
+                } else {
+                    2
+                };
+                tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
                 continue;
             }
         };
@@ -451,10 +462,14 @@ async fn telegram_reader(
                 .and_then(|u| u.username.clone().or_else(|| u.first_name.clone()))
                 .unwrap_or_default();
             let chat_type = msg.chat.chat_type.as_deref().unwrap_or("private");
+            let chat_id_str = msg.chat.id.to_string();
+            let preamble = crate::context_buffer::preamble_for("telegram", &chat_id_str)
+                .unwrap_or_default();
             let wrapped = format!(
-                "<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
-                msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
+                "{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
+                preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
             );
+            crate::context_buffer::append_user("telegram", &chat_id_str, &user_name, &text);
             let turn = UserTurn { text: wrapped };
             if tx.send(turn).await.is_err() {
                 return Err("claude pipe closed".into());
