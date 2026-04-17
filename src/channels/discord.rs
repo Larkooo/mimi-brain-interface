@@ -415,25 +415,36 @@ async fn run_gateway(
             continue;
         }
 
-        if event != "MESSAGE_CREATE" { continue; }
+        if event != "MESSAGE_CREATE" {
+            if event != "TYPING_START" && event != "PRESENCE_UPDATE" {
+                eprintln!("discord: event={event}");
+            }
+            continue;
+        }
         let d = match v.get("d") { Some(d) => d, None => continue };
 
         let author_id: u64 = d.pointer("/author/id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let is_bot = d.pointer("/author/bot").and_then(|x| x.as_bool()).unwrap_or(false);
+        let channel_id: u64 = d.get("channel_id").and_then(|x| x.as_str())
+            .and_then(|s| s.parse().ok()).unwrap_or(0);
+        let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let in_guild = d.get("guild_id").is_some();
+        let mentions_count = d.get("mentions").and_then(|x| x.as_array()).map(|a| a.len()).unwrap_or(0);
+        eprintln!(
+            "discord: MSG author={author_id} bot={is_bot} guild={in_guild} channel={channel_id} mentions={mentions_count} content_len={}",
+            content.len()
+        );
+
         if is_bot { continue; }
         if author_id != ALLOWED_USER_ID {
             eprintln!("discord: blocked user {author_id}");
             continue;
         }
-        let channel_id: u64 = d.get("channel_id").and_then(|x| x.as_str())
-            .and_then(|s| s.parse().ok()).unwrap_or(0);
-        let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if content.is_empty() || channel_id == 0 { continue; }
 
         // Guild messages: only respond if the bot is @mentioned or the
         // message is a reply to one of the bot's messages.
-        let in_guild = d.get("guild_id").is_some();
         if in_guild {
             let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
             let mentioned = d.get("mentions").and_then(|x| x.as_array())
@@ -445,7 +456,10 @@ async fn run_gateway(
             let replied_to_us = d.pointer("/referenced_message/author/id")
                 .and_then(|x| x.as_str())
                 .and_then(|s| s.parse::<u64>().ok()) == Some(bot_id);
-            if !mentioned && !replied_to_us { continue; }
+            if !mentioned && !replied_to_us {
+                eprintln!("discord: guild msg ignored (not mentioned, not reply to us)");
+                continue;
+            }
         }
 
         ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
