@@ -279,6 +279,7 @@ async fn discord_writer(
                     } else {
                         let _ = send_message(&client, &token, chan, &text).await;
                     }
+                    crate::context_buffer::append_assistant("discord", &chan.to_string(), &text);
                 }
                 pending = None;
                 last_sent_text.clear();
@@ -514,9 +515,13 @@ async fn run_gateway(
         tokio::spawn(typing_loop(client.clone(), token.to_string(), channel_id));
 
         let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
+        let channel_id_str = channel_id.to_string();
+        let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
+            .unwrap_or_default();
         let wrapped = format!(
-            "<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\">\n{content}\n</channel>"
+            "{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\">\n{content}\n</channel>"
         );
+        crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &content);
         let _ = to_claude.send(UserTurn { text: wrapped }).await;
     }
 

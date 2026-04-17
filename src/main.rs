@@ -2,8 +2,10 @@ mod brain;
 mod channels;
 mod claude;
 mod commands;
+mod context_buffer;
 mod dashboard;
 mod paths;
+mod tasks;
 
 use clap::{Parser, Subcommand};
 
@@ -61,6 +63,16 @@ enum Commands {
     Secret {
         #[command(subcommand)]
         command: SecretCommands,
+    },
+    /// Manage background tasks spawned by the channel agent
+    Task {
+        #[command(subcommand)]
+        command: TaskCommands,
+    },
+    /// Inspect or clear the cross-channel short-term context buffer
+    Context {
+        #[command(subcommand)]
+        command: ContextCommands,
     },
 }
 
@@ -160,6 +172,75 @@ enum ChannelCommands {
         /// Channel name
         name: String,
     },
+}
+
+#[derive(Subcommand)]
+enum TaskCommands {
+    /// Register a new background task and print its id
+    New {
+        /// Short human-readable title
+        title: String,
+        /// Who spawned it (e.g. "discord", "telegram", "cli")
+        #[arg(short, long, default_value = "cli")]
+        spawner: String,
+    },
+    /// List all tracked tasks
+    List,
+    /// Show metadata for a task
+    Status {
+        /// Task id
+        id: String,
+    },
+    /// Print the progress log for a task
+    Logs {
+        /// Task id
+        id: String,
+    },
+    /// Append a progress line to a task's log
+    Log {
+        /// Task id
+        id: String,
+        /// Message to append
+        message: String,
+    },
+    /// Update a task's status (pending|running|done|failed|cancelled)
+    Update {
+        /// Task id
+        id: String,
+        /// New status
+        status: String,
+    },
+    /// Stop a running task (SIGTERM its pid if known) and mark cancelled
+    Stop {
+        /// Task id
+        id: String,
+    },
+    /// Attach a pid to a task so `task stop` can signal it
+    SetPid {
+        /// Task id
+        id: String,
+        /// Process id
+        pid: i32,
+    },
+    /// Attach a final result string to a task
+    Result {
+        /// Task id
+        id: String,
+        /// Result text
+        text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// Print the last N entries from the cross-channel context buffer
+    Recent {
+        /// How many entries to print
+        #[arg(short, long, default_value_t = 20)]
+        limit: usize,
+    },
+    /// Wipe the buffer
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -283,6 +364,26 @@ async fn main() {
                 commands::secret::run(&name, &env_var, &cmd);
             }
             SecretCommands::Setup => commands::secret::setup_vault(),
+        },
+        Some(Commands::Task { command }) => match command {
+            TaskCommands::New { title, spawner } => tasks::cli_new(&title, &spawner),
+            TaskCommands::List => tasks::cli_list(),
+            TaskCommands::Status { id } => tasks::cli_status(&id),
+            TaskCommands::Logs { id } => tasks::cli_logs(&id),
+            TaskCommands::Log { id, message } => tasks::cli_log(&id, &message),
+            TaskCommands::Update { id, status } => tasks::cli_update(&id, &status),
+            TaskCommands::Stop { id } => tasks::cli_stop(&id),
+            TaskCommands::SetPid { id, pid } => tasks::cli_set_pid(&id, pid),
+            TaskCommands::Result { id, text } => tasks::cli_result(&id, &text),
+        },
+        Some(Commands::Context { command }) => match command {
+            ContextCommands::Recent { limit } => context_buffer::print_recent(limit),
+            ContextCommands::Clear => {
+                if let Err(e) = context_buffer::clear() {
+                    eprintln!("Error: {e}");
+                    std::process::exit(1);
+                }
+            }
         },
     }
 }

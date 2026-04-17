@@ -37,8 +37,23 @@ pub fn claude_md() -> PathBuf {
     home().join("CLAUDE.md")
 }
 
+pub fn recent_context_file() -> PathBuf {
+    home().join("recent_context.jsonl")
+}
+
+pub fn tasks_dir() -> PathBuf {
+    home().join("tasks")
+}
+
 pub fn ensure_dirs() {
-    for dir in [home(), memory_dir(), accounts_dir(), channels_dir(), backups_dir()] {
+    for dir in [
+        home(),
+        memory_dir(),
+        accounts_dir(),
+        channels_dir(),
+        backups_dir(),
+        tasks_dir(),
+    ] {
         fs::create_dir_all(&dir).ok();
     }
 }
