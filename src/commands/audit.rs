@@ -54,7 +54,7 @@ pub fn run() {
     }
 }
 
-fn find_repo_dir() -> std::path::PathBuf {
+pub fn find_repo_dir() -> std::path::PathBuf {
     // Check common locations
     let candidates = [
         dirs::home_dir().map(|h| h.join("mimi-brain-interface")),
