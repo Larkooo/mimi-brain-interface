@@ -374,6 +374,7 @@ struct Update {
 
 #[derive(Deserialize)]
 struct TgMessage {
+    message_id: i64,
     chat: TgChat,
     from: Option<TgUser>,
     text: Option<String>,
@@ -382,11 +383,17 @@ struct TgMessage {
 #[derive(Deserialize)]
 struct TgChat {
     id: i64,
+    #[serde(default, rename = "type")]
+    chat_type: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct TgUser {
     id: i64,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    first_name: Option<String>,
 }
 
 async fn telegram_reader(
@@ -440,7 +447,15 @@ async fn telegram_reader(
                 continue;
             }
             ACTIVE_CHAT.store(msg.chat.id, Ordering::SeqCst);
-            let turn = UserTurn { text };
+            let user_name = msg.from.as_ref()
+                .and_then(|u| u.username.clone().or_else(|| u.first_name.clone()))
+                .unwrap_or_default();
+            let chat_type = msg.chat.chat_type.as_deref().unwrap_or("private");
+            let wrapped = format!(
+                "<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
+                msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
+            );
+            let turn = UserTurn { text: wrapped };
             if tx.send(turn).await.is_err() {
                 return Err("claude pipe closed".into());
             }
