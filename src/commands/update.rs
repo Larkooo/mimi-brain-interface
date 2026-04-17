@@ -102,7 +102,7 @@ pub fn run() {
         }
 
         let dist = dashboard_dir.join("dist");
-        let dest = paths::home().join("dashboard");
+        let dest = paths::home().join("dashboard").join("dist");
         let _ = std::fs::remove_dir_all(&dest);
         copy_dir(&dist, &dest).unwrap_or_else(|e| {
             eprintln!("Error: failed to copy dashboard to {}: {}", dest.display(), e);

@@ -26,6 +26,9 @@ export interface Channel {
 
 export interface Status {
   name: string;
+  session_name: string;
+  model: string;
+  dashboard_port: number;
   session_running: boolean;
   claude_version: string;
   brain_stats: BrainStats;
@@ -248,4 +251,30 @@ export function useMemoryFiles() {
 
 export async function getMemoryFile(filename: string): Promise<{ content: string }> {
   return api(`/api/memory/${encodeURIComponent(filename)}`);
+}
+
+// Logs
+export interface LogEntry { name: string; path: string; size: number; exists: boolean }
+export async function getLogs(): Promise<LogEntry[]> { return api('/api/logs'); }
+export async function tailLog(name: string): Promise<{ name: string; path: string; text: string; lines: number }> {
+  return api(`/api/logs/${encodeURIComponent(name)}`);
+}
+
+// Services
+export interface ServiceInfo {
+  name: string;
+  active_state: string;
+  sub_state: string;
+  main_pid: number | null;
+  enabled: boolean;
+}
+export async function getServices(): Promise<ServiceInfo[]> { return api('/api/services'); }
+export async function restartService(name: string) {
+  return api(`/api/services/${encodeURIComponent(name)}/restart`, { method: 'POST' });
+}
+export async function startService(name: string) {
+  return api(`/api/services/${encodeURIComponent(name)}/start`, { method: 'POST' });
+}
+export async function stopService(name: string) {
+  return api(`/api/services/${encodeURIComponent(name)}/stop`, { method: 'POST' });
 }
