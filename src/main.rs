@@ -54,6 +54,8 @@ enum Commands {
     Reflect,
     /// Audit own codebase and propose improvements via PR
     Audit,
+    /// Pull latest master, rebuild, and install the new binary/dashboard
+    Update,
     /// Manage encrypted secrets (isolated vault)
     Secret {
         #[command(subcommand)]
@@ -239,6 +241,7 @@ async fn main() {
         Some(Commands::Backup) => commands::backup::run(),
         Some(Commands::Reflect) => commands::reflect::run(),
         Some(Commands::Audit) => commands::audit::run(),
+        Some(Commands::Update) => commands::update::run(),
         Some(Commands::Secret { command }) => match command {
             SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
             SecretCommands::List => commands::secret::list(),
