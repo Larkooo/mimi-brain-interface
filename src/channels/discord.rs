@@ -162,7 +162,7 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
             "--include-partial-messages",
             "--verbose",
             "--session-id", session_id,
-            "--model", "claude-haiku-4-5-20251001",
+            "--model", "claude-opus-4-7",
             "--dangerously-skip-permissions",
         ])
         .current_dir(&cwd)
