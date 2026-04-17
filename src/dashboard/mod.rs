@@ -193,7 +193,9 @@ async fn api_brain_query(
         return Err((StatusCode::BAD_REQUEST, "Only SELECT/WITH queries allowed via API".to_string()));
     }
     let db = brain::open();
-    Ok(Json(brain::raw_query(&db, sql)))
+    brain::raw_query(&db, sql)
+        .map(Json)
+        .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))
 }
 
 // --- Channels ---

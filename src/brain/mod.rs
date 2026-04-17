@@ -140,31 +140,32 @@ pub fn get_stats(db: &Connection) -> Stats {
     }
 }
 
-pub fn raw_query(db: &Connection, sql: &str) -> Vec<Vec<(String, String)>> {
-    let mut stmt = db.prepare(sql).expect("invalid SQL");
+pub fn raw_query(
+    db: &Connection,
+    sql: &str,
+) -> Result<Vec<Vec<(String, String)>>, rusqlite::Error> {
+    let mut stmt = db.prepare(sql)?;
     let col_count = stmt.column_count();
     let col_names: Vec<String> = (0..col_count)
         .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
         .collect();
 
-    let rows = stmt
-        .query_map([], |row| {
-            let mut cols = Vec::new();
-            for i in 0..col_count {
-                let val: String = row.get::<_, rusqlite::types::Value>(i).map(|v| match v {
-                    rusqlite::types::Value::Null => "NULL".to_string(),
-                    rusqlite::types::Value::Integer(i) => i.to_string(),
-                    rusqlite::types::Value::Real(f) => f.to_string(),
-                    rusqlite::types::Value::Text(s) => s,
-                    rusqlite::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
-                }).unwrap_or_else(|_| "?".to_string());
-                cols.push((col_names[i].clone(), val));
-            }
-            Ok(cols)
-        })
-        .expect("query failed");
+    let rows = stmt.query_map([], |row| {
+        let mut cols = Vec::new();
+        for i in 0..col_count {
+            let val: String = row.get::<_, rusqlite::types::Value>(i).map(|v| match v {
+                rusqlite::types::Value::Null => "NULL".to_string(),
+                rusqlite::types::Value::Integer(i) => i.to_string(),
+                rusqlite::types::Value::Real(f) => f.to_string(),
+                rusqlite::types::Value::Text(s) => s,
+                rusqlite::types::Value::Blob(b) => format!("<blob {} bytes>", b.len()),
+            }).unwrap_or_else(|_| "?".to_string());
+            cols.push((col_names[i].clone(), val));
+        }
+        Ok(cols)
+    })?;
 
-    rows.filter_map(|r| r.ok()).collect()
+    Ok(rows.filter_map(|r| r.ok()).collect())
 }
 
 fn row_to_entity(row: &rusqlite::Row) -> rusqlite::Result<Entity> {
