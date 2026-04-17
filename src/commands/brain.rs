@@ -80,6 +80,18 @@ pub fn add(entity_type: &str, name: &str, properties: &str) {
     println!("Created entity #{}: {} ({})", id, name, entity_type);
 }
 
+pub fn delete(id: i64) {
+    ensure_brain();
+    let conn = db::open();
+    match db::delete_entity(&conn, id) {
+        Ok(()) => println!("Deleted entity #{} (relationships cascaded)", id),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
     let conn = db::open();

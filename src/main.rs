@@ -91,6 +91,11 @@ enum BrainCommands {
         /// Target entity ID
         target: i64,
     },
+    /// Delete an entity (cascades to relationships and memory refs)
+    Delete {
+        /// Entity ID to delete
+        id: i64,
+    },
     /// Search entities by text
     Search {
         /// Search query
@@ -191,6 +196,7 @@ async fn main() {
                 name,
                 properties,
             } => commands::brain::add(&r#type, &name, &properties),
+            BrainCommands::Delete { id } => commands::brain::delete(id),
             BrainCommands::Link {
                 source,
                 rel,

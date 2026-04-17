@@ -74,6 +74,10 @@ export async function getEntities(type?: string): Promise<Entity[]> {
   return api(`/api/brain/entities${params}`);
 }
 
+export async function deleteEntity(id: number) {
+  return api(`/api/brain/entities/${id}`, { method: 'DELETE' });
+}
+
 export async function searchEntities(q: string): Promise<Entity[]> {
   return api(`/api/brain/search?q=${encodeURIComponent(q)}`);
 }
