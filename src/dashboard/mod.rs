@@ -44,6 +44,9 @@ pub async fn serve(port: u16) {
         .route("/api/session/stop", post(api_session_stop))
         // MCP
         .route("/api/mcp/list", get(api_mcp_list))
+        // Memory
+        .route("/api/memory", get(api_memory_list))
+        .route("/api/memory/{filename}", get(api_memory_file))
         // Backup
         .route("/api/backup", post(api_backup));
 
@@ -339,6 +342,89 @@ async fn api_mcp_list() -> Json<serde_json::Value> {
 async fn api_backup() -> Json<serde_json::Value> {
     commands::backup::run();
     Json(serde_json::json!({ "ok": true }))
+}
+
+// --- Memory ---
+
+#[derive(Serialize)]
+struct MemoryFileInfo {
+    name: String,
+    description: String,
+    r#type: String,
+    filename: String,
+}
+
+/// Parse simple YAML frontmatter from a markdown file.
+/// Extracts `name`, `description`, and `type` fields from the `---` block.
+fn parse_frontmatter(content: &str) -> (String, String, String) {
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut mem_type = String::new();
+
+    if content.starts_with("---") {
+        if let Some(end) = content[3..].find("---") {
+            let block = &content[3..3 + end];
+            for line in block.lines() {
+                let line = line.trim();
+                if let Some(val) = line.strip_prefix("name:") {
+                    name = val.trim().to_string();
+                } else if let Some(val) = line.strip_prefix("description:") {
+                    description = val.trim().to_string();
+                } else if let Some(val) = line.strip_prefix("type:") {
+                    mem_type = val.trim().to_string();
+                }
+            }
+        }
+    }
+    (name, description, mem_type)
+}
+
+async fn api_memory_list() -> Json<Vec<MemoryFileInfo>> {
+    let dir = paths::memory_dir();
+    let mut files: Vec<MemoryFileInfo> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| {
+            let path = e.path();
+            path.extension().is_some_and(|ext| ext == "md")
+                && path.file_name().is_some_and(|n| n != "MEMORY.md")
+        })
+        .filter_map(|entry| {
+            let filename = entry.file_name().to_string_lossy().to_string();
+            let content = fs::read_to_string(entry.path()).ok()?;
+            let (name, description, mem_type) = parse_frontmatter(&content);
+            Some(MemoryFileInfo {
+                name: if name.is_empty() {
+                    filename.trim_end_matches(".md").to_string()
+                } else {
+                    name
+                },
+                description,
+                r#type: mem_type,
+                filename,
+            })
+        })
+        .collect();
+    files.sort_by(|a, b| a.filename.cmp(&b.filename));
+    Json(files)
+}
+
+#[derive(Serialize)]
+struct MemoryContent {
+    content: String,
+}
+
+async fn api_memory_file(
+    axum::extract::Path(filename): axum::extract::Path<String>,
+) -> Result<Json<MemoryContent>, StatusCode> {
+    // Prevent path traversal
+    if filename.contains('/') || filename.contains('\\') || filename.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let path = paths::memory_dir().join(&filename);
+    let content = fs::read_to_string(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok(Json(MemoryContent { content }))
 }
 
 // --- Helpers ---
