@@ -22,3 +22,5 @@ dirs = "6"
 libc = "0.2"
 reqwest = { version = "0.12", features = ["json"] }
 uuid = { version = "1", features = ["v4"] }
+tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
+futures-util = "0.3"

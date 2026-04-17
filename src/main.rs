@@ -245,6 +245,7 @@ async fn main() {
             ChannelCommands::Start { r#type } => {
                 let result = match r#type.as_str() {
                     "telegram" => channels::telegram::start().await,
+                    "discord" => channels::discord::start().await,
                     other => Err(format!("unknown or unsupported channel: {other}")),
                 };
                 if let Err(e) = result {
@@ -255,6 +256,7 @@ async fn main() {
             ChannelCommands::Stop { r#type } => {
                 let result = match r#type.as_str() {
                     "telegram" => channels::telegram::stop(),
+                    "discord" => channels::discord::stop(),
                     other => Err(format!("unknown or unsupported channel: {other}")),
                 };
                 if let Err(e) = result {
