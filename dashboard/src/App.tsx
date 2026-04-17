@@ -9,12 +9,12 @@ import { QueryPanel } from './components/QueryPanel'
 import { ConfigPanel } from './components/ConfigPanel'
 
 function App() {
-  const { status, refresh } = useStatus()
+  const { status, error, refresh } = useStatus()
   const [_tab, setTab] = useState('overview')
 
   return (
     <div className="min-h-screen bg-background font-sans">
-      <Header status={status} />
+      <Header status={status} error={error} />
       <div className="max-w-6xl mx-auto px-6 py-6">
         <Tabs defaultValue="overview" onValueChange={setTab}>
           <TabsList className="mb-6">
@@ -25,7 +25,7 @@ function App() {
             <TabsTrigger value="config">Config</TabsTrigger>
           </TabsList>
           <TabsContent value="overview">
-            <StatusPanel status={status} onRefresh={refresh} />
+            <StatusPanel status={status} error={error} onRefresh={refresh} />
           </TabsContent>
           <TabsContent value="brain">
             <BrainPanel stats={status?.brain_stats} />

@@ -11,7 +11,7 @@ export function ConfigPanel() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    getConfig().then(c => setJson(JSON.stringify(c, null, 2))).catch(() => {})
+    getConfig().then(c => setJson(JSON.stringify(c, null, 2))).catch(e => setError(`Failed to load config: ${(e as Error).message}`))
   }, [])
 
   const handleSave = async () => {

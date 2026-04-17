@@ -5,7 +5,16 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 
-export function StatusPanel({ status, onRefresh }: { status: Status | null; onRefresh: () => void }) {
+export function StatusPanel({ status, error, onRefresh }: { status: Status | null; error: string | null; onRefresh: () => void }) {
+  if (!status && error) return (
+    <Card>
+      <CardContent className="py-8 text-center space-y-3">
+        <p className="text-amber-500 font-medium">Cannot reach Mimi API</p>
+        <p className="text-sm text-muted-foreground">{error}</p>
+        <Button size="sm" variant="outline" onClick={onRefresh}>Retry</Button>
+      </CardContent>
+    </Card>
+  )
   if (!status) return <p className="text-muted-foreground">Connecting...</p>
 
   const bs = status.brain_stats
