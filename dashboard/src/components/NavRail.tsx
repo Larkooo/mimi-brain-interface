@@ -1,13 +1,16 @@
-import { Brain, Radio, Clock, KeyRound, Settings, BookOpen } from 'lucide-react'
+import { Brain, Radio, Clock, KeyRound, Settings, BookOpen, Home, ScrollText, HardDrive } from 'lucide-react'
 
-export type View = 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'settings'
+export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'settings'
 
 const navItems: { id: View; icon: typeof Brain; label: string }[] = [
+  { id: 'home', icon: Home, label: 'Home' },
   { id: 'brain', icon: Brain, label: 'Brain' },
   { id: 'memory', icon: BookOpen, label: 'Memory' },
   { id: 'channels', icon: Radio, label: 'Channels' },
   { id: 'crons', icon: Clock, label: 'Crons' },
   { id: 'secrets', icon: KeyRound, label: 'Secrets' },
+  { id: 'logs', icon: ScrollText, label: 'Logs' },
+  { id: 'services', icon: HardDrive, label: 'Services' },
   { id: 'settings', icon: Settings, label: 'Settings' },
 ]
 
