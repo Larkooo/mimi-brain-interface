@@ -15,16 +15,22 @@ use crate::paths;
 // Hardcoded: only this user may talk to Mimi over Discord.
 const ALLOWED_USER_ID: u64 = 445355215013806081;
 
-// Intents: DIRECT_MESSAGES only. Keeps the bot deaf outside DMs; DMs don't
-// require MESSAGE_CONTENT for content visibility, so no privileged intents needed.
-const INTENTS: u64 = 1 << 12;
+// Intents: GUILD_MESSAGES | DIRECT_MESSAGES. MESSAGE_CONTENT is privileged
+// and not required — in DMs Discord always sends content, and in guilds
+// content is provided whenever the bot is @mentioned or replied to, which
+// are the only cases we react to.
+const INTENTS: u64 = (1 << 9) | (1 << 12);
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const EDIT_THROTTLE_MS: u64 = 1500;
 
-// Track the active channel ID (the DM channel of the allowed user) so the
-// writer knows where to send. Stored as AtomicU64; 0 = none.
+// Track the active channel ID (DM or guild channel) so the writer knows
+// where to send. Stored as AtomicU64; 0 = none.
 static ACTIVE_CHANNEL: AtomicU64 = AtomicU64::new(0);
+
+// Set from the READY event payload. Used to detect @mentions and replies
+// directed at us in guild channels.
+static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
 
 /// Main entrypoint — blocks until killed.
 pub async fn start() -> Result<(), String> {
@@ -400,6 +406,15 @@ async fn run_gateway(
         let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(0);
         if op != 0 { continue; } // 0 = dispatched event
         let event = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
+
+        if event == "READY" {
+            if let Some(id) = v.pointer("/d/user/id").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()) {
+                BOT_USER_ID.store(id, Ordering::SeqCst);
+                eprintln!("discord: ready, bot_user_id={id}");
+            }
+            continue;
+        }
+
         if event != "MESSAGE_CREATE" { continue; }
         let d = match v.get("d") { Some(d) => d, None => continue };
 
@@ -415,6 +430,23 @@ async fn run_gateway(
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
         if content.is_empty() || channel_id == 0 { continue; }
+
+        // Guild messages: only respond if the bot is @mentioned or the
+        // message is a reply to one of the bot's messages.
+        let in_guild = d.get("guild_id").is_some();
+        if in_guild {
+            let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
+            let mentioned = d.get("mentions").and_then(|x| x.as_array())
+                .map(|arr| arr.iter().any(|m| {
+                    m.get("id").and_then(|x| x.as_str())
+                        .and_then(|s| s.parse::<u64>().ok()) == Some(bot_id)
+                }))
+                .unwrap_or(false);
+            let replied_to_us = d.pointer("/referenced_message/author/id")
+                .and_then(|x| x.as_str())
+                .and_then(|s| s.parse::<u64>().ok()) == Some(bot_id);
+            if !mentioned && !replied_to_us { continue; }
+        }
 
         ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
         let _ = to_claude.send(UserTurn { text: content }).await;
