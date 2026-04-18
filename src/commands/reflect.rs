@@ -1,3 +1,5 @@
+use crate::channels::discord;
+use crate::context_buffer;
 use crate::paths;
 use std::process::Command;
 
@@ -63,6 +65,13 @@ pub fn run() {
     }
     println!("\nReflection complete.");
 
+    // Drop restart markers so each bridge posts a "fresh after reflect"
+    // ping into the most recently active channel on startup. Owner asked
+    // to always be told when a restart happens.
+    if let Some(chan) = latest_channel("discord") {
+        let _ = discord::write_restart_marker(chan, Some("fresh context after nightly reflect 🌀"));
+    }
+
     println!("Restarting channel bridges for fresh context...");
     for service in ["mimi-discord", "mimi-telegram"] {
         match Command::new("systemctl")
@@ -77,4 +86,14 @@ pub fn run() {
             Err(e) => eprintln!("  {service} restart error: {e}"),
         }
     }
+}
+
+/// Pick the chat_id of the most recent entry for `source` in the cross-channel
+/// context buffer. Returns `None` if nothing recent or the id can't be parsed.
+fn latest_channel(source: &str) -> Option<u64> {
+    context_buffer::recent()
+        .into_iter()
+        .rev()
+        .find(|e| e.source == source)
+        .and_then(|e| e.chat_id.parse().ok())
 }

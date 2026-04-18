@@ -107,6 +107,7 @@ pub async fn start() -> Result<(), String> {
 
     let client = reqwest::Client::new();
     tokio::spawn(discord_writer(client.clone(), token.clone(), to_dc_rx));
+    tokio::spawn(send_restart_ping(client.clone(), token.clone()));
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
@@ -215,6 +216,60 @@ fn load_access() -> Access {
 
 fn pidfile() -> PathBuf {
     channel_dir().join("pid")
+}
+
+fn restart_marker_path() -> PathBuf {
+    channel_dir().join("restart_pending")
+}
+
+/// Drop a marker so the next `mimi channel start discord` (or systemd
+/// restart of `mimi-discord`) posts a "back online" ping to `channel_id`.
+/// Optionally include a custom `msg`; defaults to a short greeting.
+///
+/// Any code path that intentionally restarts the bridge (the claude
+/// subprocess calling `systemctl restart mimi-discord`, nightly reflect,
+/// `mimi update` after a rebuild, dashboard restarts) should call this
+/// first with the channel the restart was initiated from. Unexpected
+/// crashes/restarts have no marker and stay silent.
+pub fn write_restart_marker(channel_id: u64, msg: Option<&str>) -> Result<(), String> {
+    let dir = channel_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let payload = match msg {
+        Some(m) => format!("{channel_id}:{m}"),
+        None => format!("{channel_id}"),
+    };
+    std::fs::write(restart_marker_path(), payload)
+        .map_err(|e| format!("write restart marker: {e}"))
+}
+
+/// Read the marker (if any), wait briefly for the gateway to establish,
+/// then post a "back online" message to the recorded channel.
+async fn send_restart_ping(client: reqwest::Client, token: String) {
+    let path = restart_marker_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = std::fs::remove_file(&path);
+    let contents = contents.trim();
+    if contents.is_empty() { return; }
+    let (chan_str, msg) = match contents.split_once(':') {
+        Some((c, m)) => (c, m.to_string()),
+        None => (contents, "back online 🌀".to_string()),
+    };
+    let chan: u64 = match chan_str.parse() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("discord: bad restart marker ({contents:?}): {e}");
+            return;
+        }
+    };
+    // Gateway handshake + READY usually lands in <2s; give it a beat
+    // before hitting the REST API so we don't race.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    if let Err(e) = send_message(&client, &token, chan, &msg).await {
+        eprintln!("discord: restart ping failed: {e}");
+    }
 }
 
 fn write_pidfile() -> Result<(), String> {
