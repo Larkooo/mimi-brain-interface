@@ -12,6 +12,7 @@ import { SecretsView } from './components/secrets/SecretsView'
 import { SettingsView } from './components/settings/SettingsView'
 import { LogsView } from './components/logviewer/LogsView'
 import { ServicesView } from './components/services/ServicesView'
+import { NutritionView } from './components/nutrition/NutritionView'
 
 function App() {
   const { status, refresh } = useStatus()
@@ -45,6 +46,7 @@ function App() {
       {view === 'secrets' && <WithHeader title="Secrets"><SecretsView /></WithHeader>}
       {view === 'logs' && <LogsView />}
       {view === 'services' && <ServicesView />}
+      {view === 'nutrition' && <NutritionView />}
       {view === 'settings' && <WithHeader title="Settings"><SettingsView status={status} onRefresh={refresh} /></WithHeader>}
     </div>
   )
