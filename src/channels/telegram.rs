@@ -467,9 +467,10 @@ async fn telegram_reader(
             let chat_id_str = msg.chat.id.to_string();
             let preamble = crate::context_buffer::preamble_for("telegram", &chat_id_str)
                 .unwrap_or_default();
+            let time_ctx = crate::channels::time_context_preamble();
             let wrapped = format!(
-                "{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
-                preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
+                "{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
+                time_ctx, preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
             );
             crate::context_buffer::append_user("telegram", &chat_id_str, &user_name, &text);
             let turn = UserTurn { text: wrapped };

@@ -761,8 +761,9 @@ async fn run_gateway(
             Permission::Guest => (GUEST_SYSTEM_REMINDER.to_string(), load_guest_memory_inject()),
             Permission::StrictGuest => (STRICT_GUEST_SYSTEM_REMINDER.to_string(), String::new()),
         };
+        let time_ctx = crate::channels::time_context_preamble();
         let wrapped = format!(
-            "{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
+            "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
             perm = permission.as_str()
         );
         crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &content);
