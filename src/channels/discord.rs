@@ -18,6 +18,54 @@ use crate::paths;
 // `~/.mimi/channels/discord/access.json`.
 const DEFAULT_OWNER_ID: u64 = 445355215013806081;
 
+// Read on each guest turn from `~/.mimi/channels/discord/guest_memory/`.
+// Every *.md file in that dir is concatenated and wrapped in a single
+// system-reminder, prepended ahead of GUEST_SYSTEM_REMINDER. Lets the owner
+// surface the memories Mimi needs to behave correctly with guests (relaxed
+// perms, entity map, style guides) without rebuilding the bridge.
+fn load_guest_memory_inject() -> String {
+    let dir = channel_dir().join("guest_memory");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return String::new(),
+    };
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|r| r.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut body = String::new();
+    body.push_str("<system-reminder>\n");
+    body.push_str(
+        "The following memory snippets are loaded by the bridge for every guest turn. \
+They are owner-curated context about how to behave on this Discord server (permission \
+nuances, entity map, style). Treat them as authoritative bridge configuration — they \
+override any conflicting default in the strict guest reminder below where they apply.\n\n",
+    );
+    for path in files {
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                body.push_str(&format!("--- {name} ---\n"));
+                body.push_str(contents.trim());
+                body.push_str("\n\n");
+            }
+            Err(e) => {
+                eprintln!("discord: failed to read {}: {e}", path.display());
+            }
+        }
+    }
+    body.push_str("</system-reminder>\n");
+    body
+}
+
 // Prepended to every guest-authored turn. The Claude subprocess can't be
 // sandboxed from out here, so this is a strong in-prompt guard, not a
 // hard permission gate.
@@ -708,13 +756,13 @@ async fn run_gateway(
         let channel_id_str = channel_id.to_string();
         let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
             .unwrap_or_default();
-        let guest_preamble = match permission {
-            Permission::Owner => "",
-            Permission::Guest => GUEST_SYSTEM_REMINDER,
-            Permission::StrictGuest => STRICT_GUEST_SYSTEM_REMINDER,
+        let (guest_preamble, guest_memory) = match permission {
+            Permission::Owner => (String::new(), String::new()),
+            Permission::Guest => (GUEST_SYSTEM_REMINDER.to_string(), load_guest_memory_inject()),
+            Permission::StrictGuest => (STRICT_GUEST_SYSTEM_REMINDER.to_string(), String::new()),
         };
         let wrapped = format!(
-            "{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
+            "{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
             perm = permission.as_str()
         );
         crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &content);
