@@ -1,31 +1,43 @@
 use crate::paths;
 use std::process::Command;
 
-const REFLECT_PROMPT: &str = r#"You are Mimi's prefrontal cortex — a meta-cognitive process that reflects on Mimi's state, memories, and knowledge.
+const REFLECT_PROMPT: &str = r#"You are Mimi's prefrontal cortex — a nightly "dreaming" cycle that audits Mimi's running inference context and consolidates it into persistent memory.
 
-Your job is to review Mimi's current brain state and perform maintenance:
+Mimi runs as two long-lived `claude -p --input-format stream-json` subprocesses (the Discord and Telegram channel bridges). Over 24h their inference context fills up with conversations, tool calls, and scratch work. Before those bridges are restarted to clear the accumulated context, YOU (this reflection session) must extract anything durable.
 
-1. **Review recent memories** — read the memory files in ~/.mimi/memory/
-2. **Audit the knowledge graph** — query brain.db for:
-   - Duplicate entities (same name or very similar names, different IDs) — merge them
-   - Orphaned entities (no relationships) — add relationships or note why they're standalone
-   - Stale or contradictory information — update or remove
-   - Missing relationships that should exist based on memories — add them
-3. **Consolidate** — actually execute the merges, link additions, and cleanups via sqlite3 commands
-4. **Reorganize memories** — update MEMORY.md index if it's out of date, archive old reflections
-5. **Reflect** — write a reflection memory summarizing:
-   - What Mimi has learned recently
-   - What patterns or gaps you notice in the knowledge graph
-   - What Mimi should pay attention to going forward
-   - Self-improvement observations
-   - A brief "state of mind" — how coherent and organized is the brain right now?
+**Your inputs — the raw transcripts of Mimi's recent conversations:**
+- `~/.claude/projects/-home-ubuntu--mimi/*.jsonl` — one JSONL file per Mimi session. Each line is a message event (user / assistant / tool_use / tool_result).
+- Read files whose mtime is within the last ~24h. `ls -t` + `stat -c '%Y %n'` to pick them.
+- Some sessions span a day; those long ones are the richest sources.
 
-Save your reflection as: ~/.mimi/memory/reflect_YYYY-MM-DD.md
-Update ~/.mimi/memory/MEMORY.md to include the new reflection.
+**What to extract and save:**
+1. **Durable facts about people** — nicknames, real names, relationships, preferences, inside jokes, running bits. Backfill `brain.db` (entities + relationships) using `~/.mimi/bin/brain`.
+2. **User corrections and feedback** — any "don't do X" / "do Y instead" / "yes exactly like that". Save as `feedback_*.md` in `~/.mimi/memory/` and index in MEMORY.md. These shape future behavior — load-bearing.
+3. **Behavioral patterns** — what worked, what didn't, what matched/broke channel vibe.
+4. **Project state** — ongoing tasks, pending crons, scheduled items, open PRs, deploy state.
+5. **References** — new external resources, dashboards, accounts worth remembering.
 
-Be thorough but efficient. Actually run the cleanup queries, don't just list what should be done.
+**Brain hygiene (secondary):**
+- Merge duplicate entities, backfill obvious missing relationships, drop clear orphans. When in doubt, keep.
 
-Start by reading ~/.mimi/memory/MEMORY.md, then query the brain, then do the work."#;
+**Write `~/.mimi/memory/reflect_YYYY-MM-DD.md`** — short human-readable summary:
+- What Mimi learned today (1-3 bullets)
+- New memories/entities added (list with paths)
+- Corrections absorbed
+- Gaps / weirdness noticed
+- State of mind
+
+**Update `~/.mimi/memory/MEMORY.md`** to index any new memory files.
+
+**Efficiency:** Transcripts are big. Don't cat them all. Use `jq` on the JSONL, e.g. `jq -r 'select(.type=="user") | .message.content[0].text? // empty' file.jsonl` — focus on user and assistant messages, skip tool_result noise unless it contains learning-relevant info.
+
+**Do not:**
+- Delete or archive the transcripts themselves (the bridge infra manages them).
+- Write ephemera ("today I replied at 01:14") — those are logs, not memories.
+- Duplicate existing memories; prefer updating.
+- Emit status summaries beyond what's useful for the cron log.
+
+Start by reading `~/.mimi/memory/MEMORY.md`, then list recent transcripts, then do the work."#;
 
 pub fn run() {
     if !paths::brain_db().exists() {
@@ -33,23 +45,6 @@ pub fn run() {
         std::process::exit(1);
     }
 
-    let config: serde_json::Value = std::fs::read_to_string(paths::config_file())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or(serde_json::json!({}));
-    let session = config
-        .get("session_name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("mimi");
-
-    // Step 1: Stop the running session to free context
-    println!("Stopping active session to clear context...");
-    Command::new("tmux")
-        .args(["kill-session", "-t", session])
-        .output()
-        .ok();
-
-    // Step 2: Run the reflection as a one-shot claude --print
     println!("Running self-reflection cycle...\n");
     let mimi_home = paths::home();
     let status = Command::new("claude")
@@ -62,16 +57,24 @@ pub fn run() {
         .status()
         .expect("failed to run claude — is it installed?");
 
-    if status.success() {
-        println!("\nReflection complete.");
-    } else {
-        eprintln!("Reflection failed.");
-    }
-
-    // Step 3: Relaunch Mimi with a fresh context
-    println!("Relaunching Mimi with fresh context...");
-    if let Err(e) = crate::claude::launch_tmux(session) {
-        eprintln!("Failed to relaunch: {e}");
+    if !status.success() {
+        eprintln!("Reflection failed — skipping context reset.");
         std::process::exit(1);
+    }
+    println!("\nReflection complete.");
+
+    println!("Restarting channel bridges for fresh context...");
+    for service in ["mimi-discord", "mimi-telegram"] {
+        match Command::new("systemctl")
+            .args(["--user", "restart", service])
+            .output()
+        {
+            Ok(o) if o.status.success() => println!("  {service} restarted"),
+            Ok(o) => eprintln!(
+                "  {service} restart failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("  {service} restart error: {e}"),
+        }
     }
 }
