@@ -278,3 +278,101 @@ export async function startService(name: string) {
 export async function stopService(name: string) {
   return api(`/api/services/${encodeURIComponent(name)}/stop`, { method: 'POST' });
 }
+
+// --- Nutrition ---
+
+export interface NutritionMeal {
+  id: number;
+  meal_date: string;
+  logged_at: string;
+  food_text: string;
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  source: string;
+}
+
+export interface NutritionTotals {
+  calories: number;
+  protein_g: number;
+  carbs_g: number;
+  fat_g: number;
+  meals_count: number;
+}
+
+export interface NutritionDay {
+  date: string;
+  user: string;
+  totals: NutritionTotals;
+  meals: NutritionMeal[];
+}
+
+export interface NutritionDayRow {
+  date: string;
+  cal: number;
+  prot: number;
+  carbs: number;
+  fat: number;
+  meals: number;
+}
+
+export interface NutritionTrend {
+  days: NutritionDayRow[];
+  avg: NutritionTotals;
+}
+
+export interface NutritionGoals {
+  user: string;
+  tdee: number | null;
+  target_cals: number | null;
+  target_protein_g: number | null;
+  target_carbs_g: number | null;
+  target_fat_g: number | null;
+  weight_kg: number | null;
+  height_cm: number | null;
+  bodyfat_pct: number | null;
+  phase: string | null;
+  updated_at: string | null;
+}
+
+export async function getNutritionToday(): Promise<NutritionDay> {
+  return api('/api/nutrition/today');
+}
+export async function getNutritionDay(date: string): Promise<NutritionDay> {
+  return api(`/api/nutrition/day/${date}`);
+}
+export async function getNutritionWeek(): Promise<NutritionTrend> {
+  return api('/api/nutrition/week');
+}
+export async function getNutritionMonth(): Promise<NutritionTrend> {
+  return api('/api/nutrition/month');
+}
+export async function getNutritionGoals(): Promise<NutritionGoals> {
+  return api('/api/nutrition/goals');
+}
+export async function setNutritionGoals(goals: Partial<NutritionGoals>) {
+  return api('/api/nutrition/goals', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(goals),
+  });
+}
+export async function logNutrition(meal: {
+  food_text: string;
+  calories: number;
+  protein_g?: number;
+  carbs_g?: number;
+  fat_g?: number;
+  meal_date?: string;
+  source?: string;
+}) {
+  return api('/api/nutrition/log', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(meal),
+  });
+}
+export async function deleteNutritionLog(id: number) {
+  return api(`/api/nutrition/log/${id}`, { method: 'DELETE' });
+}

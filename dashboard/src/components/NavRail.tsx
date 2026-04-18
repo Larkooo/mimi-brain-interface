@@ -1,6 +1,6 @@
-import { Brain, Radio, Clock, KeyRound, Settings, BookOpen, Home, ScrollText, HardDrive } from 'lucide-react'
+import { Brain, Radio, Clock, KeyRound, Settings, BookOpen, Home, ScrollText, HardDrive, Flame } from 'lucide-react'
 
-export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'settings'
+export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'nutrition' | 'settings'
 
 const navItems: { id: View; icon: typeof Brain; label: string }[] = [
   { id: 'home', icon: Home, label: 'Home' },
@@ -11,6 +11,7 @@ const navItems: { id: View; icon: typeof Brain; label: string }[] = [
   { id: 'secrets', icon: KeyRound, label: 'Secrets' },
   { id: 'logs', icon: ScrollText, label: 'Logs' },
   { id: 'services', icon: HardDrive, label: 'Services' },
+  { id: 'nutrition', icon: Flame, label: 'Nutrition' },
   { id: 'settings', icon: Settings, label: 'Settings' },
 ]
 

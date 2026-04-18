@@ -10,6 +10,8 @@ use crate::commands;
 use crate::paths;
 use std::fs;
 
+mod nutrition;
+
 pub async fn serve(port: u16) {
     // Try to find the React build directory
     // Check: cwd/dashboard/dist, exe/../../../dashboard/dist, ~/.mimi/dashboard/dist
@@ -65,7 +67,15 @@ pub async fn serve(port: u16) {
         .route("/api/services/{name}/stop", post(api_services_stop))
         .route("/api/services/{name}/restart", post(api_services_restart))
         // Backup
-        .route("/api/backup", post(api_backup));
+        .route("/api/backup", post(api_backup))
+        // Nutrition
+        .route("/api/nutrition/today", get(nutrition::api_today))
+        .route("/api/nutrition/day/{date}", get(nutrition::api_day))
+        .route("/api/nutrition/week", get(nutrition::api_week))
+        .route("/api/nutrition/month", get(nutrition::api_month))
+        .route("/api/nutrition/goals", get(nutrition::api_goals).post(nutrition::api_set_goals))
+        .route("/api/nutrition/log", post(nutrition::api_log))
+        .route("/api/nutrition/log/{id}", delete(nutrition::api_delete_log));
 
     // Serve React build
     if let Some(ref dist) = dashboard_dist {
