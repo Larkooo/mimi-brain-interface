@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -396,18 +398,75 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
         .map_err(|e| format!("failed to spawn claude: {e}"))
 }
 
-struct UserTurn { text: String }
+struct UserTurn {
+    text: String,
+    images: Vec<InlineImage>,
+}
+
+struct InlineImage {
+    media_type: String,
+    data_b64: String,
+}
+
+// Claude API supports image/jpeg, image/png, image/gif, image/webp — up to
+// 5MB each and 20 per request. Skip anything else so a weird attachment
+// doesn't poison the whole turn.
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+const MAX_IMAGES_PER_TURN: usize = 10;
+
+fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
+    match ct {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
 
 async fn feed_claude(mut stdin: ChildStdin, mut rx: mpsc::Receiver<UserTurn>) {
     while let Some(turn) = rx.recv().await {
+        let content_val = if turn.images.is_empty() {
+            Value::String(turn.text)
+        } else {
+            let mut blocks: Vec<Value> = Vec::with_capacity(turn.images.len() + 1);
+            blocks.push(json!({ "type": "text", "text": turn.text }));
+            for img in turn.images {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data_b64,
+                    }
+                }));
+            }
+            Value::Array(blocks)
+        };
         let payload = json!({
             "type": "user",
-            "message": { "role": "user", "content": turn.text }
+            "message": { "role": "user", "content": content_val }
         });
         let line = format!("{}\n", payload);
         if stdin.write_all(line.as_bytes()).await.is_err() { return; }
         if stdin.flush().await.is_err() { return; }
     }
+}
+
+async fn fetch_attachment_bytes(
+    client: &reqwest::Client,
+    url: &str,
+) -> Result<Vec<u8>, String> {
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("get {url}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("attachment fetch status {}", resp.status()));
+    }
+    let bytes = resp.bytes().await.map_err(|e| format!("read bytes: {e}"))?;
+    Ok(bytes.to_vec())
 }
 
 // --- Claude stdout → Discord pipeline ---
@@ -723,7 +782,26 @@ async fn run_gateway(
         let channel_id: u64 = d.get("channel_id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if content.is_empty() || channel_id == 0 { continue; }
+        let image_attachments: Vec<(String, String)> = d
+            .get("attachments")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|a| {
+                        let url = a.get("url").and_then(|x| x.as_str())?.to_string();
+                        let ct = a
+                            .get("content_type")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("");
+                        let media = claude_supported_image_mime(ct)?;
+                        Some((url, media.to_string()))
+                    })
+                    .take(MAX_IMAGES_PER_TURN)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if channel_id == 0 { continue; }
+        if content.is_empty() && image_attachments.is_empty() { continue; }
 
         let guild_id: Option<u64> = d.get("guild_id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok());
@@ -752,6 +830,30 @@ async fn run_gateway(
         TYPING_ACTIVE.store(true, Ordering::SeqCst);
         tokio::spawn(typing_loop(client.clone(), token.to_string(), channel_id));
 
+        let mut images: Vec<InlineImage> = Vec::new();
+        for (url, media_type) in &image_attachments {
+            match fetch_attachment_bytes(client, url).await {
+                Ok(bytes) => {
+                    if bytes.len() > MAX_IMAGE_BYTES {
+                        eprintln!(
+                            "discord: skipping attachment {url} ({} bytes > {} cap)",
+                            bytes.len(),
+                            MAX_IMAGE_BYTES
+                        );
+                        continue;
+                    }
+                    let data_b64 = BASE64_STANDARD.encode(&bytes);
+                    images.push(InlineImage {
+                        media_type: media_type.clone(),
+                        data_b64,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("discord: attachment fetch failed: {e}");
+                }
+            }
+        }
+
         let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
         let channel_id_str = channel_id.to_string();
         let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
@@ -762,12 +864,26 @@ async fn run_gateway(
             Permission::StrictGuest => (STRICT_GUEST_SYSTEM_REMINDER.to_string(), String::new()),
         };
         let time_ctx = crate::channels::time_context_preamble();
+        let image_marker = if images.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n[{} image attachment{} included below]",
+                images.len(),
+                if images.len() == 1 { "" } else { "s" }
+            )
+        };
         let wrapped = format!(
-            "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}\n</channel>",
+            "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}{image_marker}\n</channel>",
             perm = permission.as_str()
         );
-        crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &content);
-        let _ = to_claude.send(UserTurn { text: wrapped }).await;
+        let context_content = if images.is_empty() {
+            content.clone()
+        } else {
+            format!("{content}{image_marker}")
+        };
+        crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &context_content);
+        let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
     }
 
     hb_task.abort();
