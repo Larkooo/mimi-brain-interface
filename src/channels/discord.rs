@@ -899,9 +899,37 @@ async fn run_gateway(
         let message_id: u64 = d.get("id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok()).unwrap_or(0);
 
+        let in_guild = guild_id.is_some();
+        let channel_id_passive = channel_id.to_string();
+
+        // Always log the incoming message to the rolling context buffer —
+        // even unmentioned guild chatter — so the next time mimi IS
+        // triggered in this channel her `<recent_context>` preamble shows
+        // what's been happening. Costs nothing (no LLM call) and gives her
+        // passive awareness of the conversation she just joined.
+        let image_marker_for_log = if image_attachments.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "\n[{} image attachment{} included below]",
+                image_attachments.len(),
+                if image_attachments.len() == 1 { "" } else { "s" }
+            )
+        };
+        let passive_log_body = if image_attachments.is_empty() {
+            content.clone()
+        } else {
+            format!("{content}{image_marker_for_log}")
+        };
+        crate::context_buffer::append_user(
+            "discord",
+            &channel_id_passive,
+            &user_name,
+            &passive_log_body,
+        );
+
         // Guild messages: only respond if the bot is @mentioned or the
         // message is a reply to one of the bot's messages.
-        let in_guild = guild_id.is_some();
         if in_guild {
             let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
             let mentioned = d.get("mentions").and_then(|x| x.as_array())
@@ -967,12 +995,8 @@ async fn run_gateway(
             "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}{image_marker}\n</channel>",
             perm = permission.as_str()
         );
-        let context_content = if images.is_empty() {
-            content.clone()
-        } else {
-            format!("{content}{image_marker}")
-        };
-        crate::context_buffer::append_user("discord", &channel_id_str, &user_name, &context_content);
+        // User-msg already logged to context_buffer above (passive-awareness
+        // path), so no need to log again here.
         let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
     }
 
