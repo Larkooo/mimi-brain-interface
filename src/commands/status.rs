@@ -1,5 +1,6 @@
 use crate::brain;
 use crate::paths;
+use crate::services;
 use std::process::Command;
 
 pub fn run() {
@@ -60,6 +61,20 @@ pub fn run() {
         }
         Err(e) => {
             eprintln!("  Brain stats unavailable: {}", e);
+        }
+    }
+
+    // Managed systemd services (bridges, dashboard)
+    let service_list = services::list();
+    if !service_list.is_empty() {
+        println!("\n  Services:");
+        for s in &service_list {
+            let pid = s.main_pid.map(|p| format!(" pid={p}")).unwrap_or_default();
+            let enabled = if s.enabled { "" } else { " (disabled)" };
+            println!(
+                "    {:16} {}/{}{}{}",
+                s.name, s.active_state, s.sub_state, pid, enabled
+            );
         }
     }
 

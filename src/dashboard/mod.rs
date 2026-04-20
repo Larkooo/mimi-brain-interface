@@ -645,51 +645,17 @@ async fn api_logs_tail(axum::extract::Path(name): axum::extract::Path<String>)
 
 // --- Services (systemd user) ---
 
-const MANAGED_SERVICES: &[&str] = &["mimi-telegram", "mimi-discord", "mimi-dashboard"];
+use crate::services;
 
-#[derive(Serialize)]
-struct ServiceInfo {
-    name: String,
-    active_state: String,
-    sub_state: String,
-    main_pid: Option<u32>,
-    enabled: bool,
+async fn api_services_list() -> Json<Vec<services::ServiceInfo>> {
+    Json(services::list())
 }
-
-fn systemctl_user(args: &[&str]) -> Option<String> {
-    let out = std::process::Command::new("systemctl")
-        .arg("--user").args(args).output().ok()?;
-    if !out.status.success() { return None; }
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
-}
-
-fn service_info(name: &str) -> ServiceInfo {
-    let show = systemctl_user(&["show", name, "--no-page"]).unwrap_or_default();
-    let mut active_state = String::from("unknown");
-    let mut sub_state = String::from("unknown");
-    let mut main_pid: Option<u32> = None;
-    for line in show.lines() {
-        if let Some(v) = line.strip_prefix("ActiveState=") { active_state = v.into(); }
-        else if let Some(v) = line.strip_prefix("SubState=") { sub_state = v.into(); }
-        else if let Some(v) = line.strip_prefix("MainPID=") { main_pid = v.parse().ok().filter(|p| *p != 0); }
-    }
-    let enabled = systemctl_user(&["is-enabled", name])
-        .map(|s| s.trim() == "enabled")
-        .unwrap_or(false);
-    ServiceInfo { name: name.into(), active_state, sub_state, main_pid, enabled }
-}
-
-async fn api_services_list() -> Json<Vec<ServiceInfo>> {
-    Json(MANAGED_SERVICES.iter().map(|n| service_info(n)).collect())
-}
-
-fn is_managed(name: &str) -> bool { MANAGED_SERVICES.contains(&name) }
 
 async fn api_services_start(axum::extract::Path(name): axum::extract::Path<String>)
     -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
-    systemctl_user(&["start", &name])
+    if !services::is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
+    services::systemctl_user(&["start", &name])
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl start {name} failed")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -697,8 +663,8 @@ async fn api_services_start(axum::extract::Path(name): axum::extract::Path<Strin
 async fn api_services_stop(axum::extract::Path(name): axum::extract::Path<String>)
     -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
-    systemctl_user(&["stop", &name])
+    if !services::is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
+    services::systemctl_user(&["stop", &name])
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl stop {name} failed")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -706,8 +672,8 @@ async fn api_services_stop(axum::extract::Path(name): axum::extract::Path<String
 async fn api_services_restart(axum::extract::Path(name): axum::extract::Path<String>)
     -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
-    systemctl_user(&["restart", &name])
+    if !services::is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
+    services::systemctl_user(&["restart", &name])
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl restart {name} failed")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }

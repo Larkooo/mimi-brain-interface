@@ -5,6 +5,7 @@ mod commands;
 mod context_buffer;
 mod dashboard;
 mod paths;
+mod services;
 mod tasks;
 
 use clap::{Parser, Subcommand};
