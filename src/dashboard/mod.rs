@@ -11,6 +11,7 @@ use crate::paths;
 use std::fs;
 
 mod nutrition;
+mod tasks;
 
 pub async fn serve(port: u16) {
     // Try to find the React build directory
@@ -75,7 +76,12 @@ pub async fn serve(port: u16) {
         .route("/api/nutrition/month", get(nutrition::api_month))
         .route("/api/nutrition/goals", get(nutrition::api_goals).post(nutrition::api_set_goals))
         .route("/api/nutrition/log", post(nutrition::api_log))
-        .route("/api/nutrition/log/{id}", delete(nutrition::api_delete_log));
+        .route("/api/nutrition/log/{id}", delete(nutrition::api_delete_log))
+        // Tasks
+        .route("/api/tasks", get(tasks::api_list).post(tasks::api_create))
+        .route("/api/tasks/tree", get(tasks::api_tree))
+        .route("/api/tasks/summary", get(tasks::api_summary))
+        .route("/api/tasks/{id}", get(tasks::api_get).patch(tasks::api_update).delete(tasks::api_delete));
 
     // Serve React build
     if let Some(ref dist) = dashboard_dist {
