@@ -3,21 +3,18 @@ import { useMemoryFiles, getMemoryFile } from '../../hooks/useApi'
 import { BookOpen, FileText, User, MessageSquare, FolderOpen, Bookmark, Search } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 
-const TYPE_CONFIG: Record<string, { icon: typeof FileText; color: string; label: string }> = {
-  user: { icon: User, color: '#00d4ff', label: 'User' },
-  feedback: { icon: MessageSquare, color: '#00ffa3', label: 'Feedback' },
-  project: { icon: FolderOpen, color: '#863bff', label: 'Project' },
-  reference: { icon: Bookmark, color: '#ff9f43', label: 'Reference' },
+const TYPE_CONFIG: Record<string, { icon: typeof FileText; label: string }> = {
+  user:      { icon: User,         label: 'User' },
+  feedback:  { icon: MessageSquare,label: 'Feedback' },
+  project:   { icon: FolderOpen,   label: 'Project' },
+  reference: { icon: Bookmark,     label: 'Reference' },
 }
 
 function TypeBadge({ type }: { type: string }) {
-  const config = TYPE_CONFIG[type] || { icon: FileText, color: '#888', label: type || 'unknown' }
+  const config = TYPE_CONFIG[type] || { icon: FileText, label: type || 'unknown' }
   const Icon = config.icon
   return (
-    <span
-      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium uppercase tracking-wider"
-      style={{ color: config.color, background: `${config.color}15`, border: `1px solid ${config.color}25` }}
-    >
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-border bg-muted/40 text-[10px] uppercase tracking-wider text-muted-foreground">
       <Icon size={10} />
       {config.label}
     </span>
@@ -63,84 +60,59 @@ export function MemoryView() {
   }
 
   return (
-    <div className="h-full flex">
-      {/* Left panel - file list */}
-      <div className="w-80 shrink-0 h-full flex flex-col border-r border-white/6">
-        <div className="p-4 pb-3 space-y-3">
-          <div className="flex items-center gap-2">
-            <BookOpen size={18} className="text-[#00d4ff]" />
-            <h1 className="text-sm font-medium text-white/90">Memory</h1>
-            <span className="text-[10px] text-white/25 ml-auto">{files.length} files</span>
+    <div className="h-screen flex">
+      <aside className="w-[300px] shrink-0 h-full flex flex-col border-r border-border">
+        <div className="px-4 pt-6 pb-3 space-y-3">
+          <div className="flex items-baseline justify-between">
+            <div>
+              <div className="eyebrow">Section</div>
+              <h1 className="text-[20px] font-semibold tracking-tight leading-none">Memory</h1>
+            </div>
+            <span className="text-[11px] text-muted-foreground num">{files.length}</span>
           </div>
 
           <div className="relative">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-white/20" />
+            <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/60" />
             <Input
               placeholder="Search memories..."
               value={filter}
               onChange={e => setFilter(e.target.value)}
-              className="bg-white/5 border-white/10 text-white/80 text-xs pl-8 h-8"
+              className="bg-muted/40 border-border text-xs pl-8 h-8"
             />
           </div>
 
           <div className="flex gap-1 flex-wrap">
-            <button
-              onClick={() => setTypeFilter(null)}
-              className={`px-2 py-0.5 rounded text-[10px] transition-all ${
-                !typeFilter
-                  ? 'bg-[#00d4ff]/15 text-[#00d4ff] border border-[#00d4ff]/30'
-                  : 'bg-white/5 text-white/30 border border-white/8 hover:text-white/50'
-              }`}
-            >
-              All
-            </button>
-            {types.map(t => {
-              const config = TYPE_CONFIG[t]
-              return (
-                <button
-                  key={t}
-                  onClick={() => setTypeFilter(typeFilter === t ? null : t)}
-                  className={`px-2 py-0.5 rounded text-[10px] transition-all ${
-                    typeFilter === t
-                      ? `border`
-                      : 'bg-white/5 text-white/30 border border-white/8 hover:text-white/50'
-                  }`}
-                  style={typeFilter === t ? {
-                    color: config?.color || '#888',
-                    background: `${config?.color || '#888'}15`,
-                    borderColor: `${config?.color || '#888'}30`,
-                  } : undefined}
-                >
-                  {t}
-                </button>
-              )
-            })}
+            <FilterChip active={!typeFilter} onClick={() => setTypeFilter(null)}>All</FilterChip>
+            {types.map(t => (
+              <FilterChip key={t} active={typeFilter === t} onClick={() => setTypeFilter(typeFilter === t ? null : t)}>
+                {t}
+              </FilterChip>
+            ))}
           </div>
         </div>
 
         <div className="flex-1 overflow-y-auto px-2 pb-4">
           {Object.entries(grouped).map(([type, items]) => (
             <div key={type} className="mb-3">
-              <div className="px-2 py-1.5 text-[10px] text-white/20 uppercase tracking-wider font-medium">
-                {TYPE_CONFIG[type]?.label || type} ({items.length})
+              <div className="px-2 py-1.5 eyebrow">
+                {TYPE_CONFIG[type]?.label || type} <span className="text-muted-foreground/60 num">({items.length})</span>
               </div>
               {items.map(f => (
                 <button
                   key={f.filename}
                   onClick={() => setSelected(f.filename)}
-                  className={`w-full text-left px-3 py-2 rounded-lg mb-0.5 transition-all ${
+                  className={[
+                    'w-full text-left px-3 py-2 rounded-md mb-0.5 transition-colors',
                     selected === f.filename
-                      ? 'bg-[#00d4ff]/10 border border-[#00d4ff]/20'
-                      : 'hover:bg-white/5 border border-transparent'
-                  }`}
+                      ? 'bg-accent text-foreground'
+                      : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
+                  ].join(' ')}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className={`text-xs truncate ${selected === f.filename ? 'text-[#00d4ff]' : 'text-white/70'}`}>
-                      {f.name || f.filename}
-                    </span>
+                  <div className="text-[12px] truncate font-medium tracking-tight">
+                    {f.name || f.filename}
                   </div>
                   {f.description && (
-                    <p className="text-[10px] text-white/25 truncate mt-0.5">{f.description}</p>
+                    <p className="text-[10px] text-muted-foreground/70 truncate mt-0.5">{f.description}</p>
                   )}
                 </button>
               ))}
@@ -148,28 +120,27 @@ export function MemoryView() {
           ))}
           {filtered.length === 0 && (
             <div className="text-center py-10">
-              <BookOpen size={24} className="mx-auto mb-2 text-white/10" />
-              <p className="text-xs text-white/25">No memories found</p>
+              <BookOpen size={22} strokeWidth={1.4} className="mx-auto mb-2 text-muted-foreground/40" />
+              <p className="text-[12px] text-muted-foreground">No memories found</p>
             </div>
           )}
         </div>
-      </div>
+      </aside>
 
-      {/* Right panel - content viewer */}
-      <div className="flex-1 h-full overflow-y-auto">
+      <section className="flex-1 h-full overflow-y-auto">
         {selected ? (
-          <div className="p-6">
-            <div className="flex items-center gap-3 mb-4">
-              <FileText size={16} className="text-[#00d4ff]/60" />
-              <h2 className="text-sm font-medium text-white/80">{selected}</h2>
+          <div className="px-10 py-10 max-w-3xl">
+            <div className="flex items-center gap-3 mb-5">
+              <FileText size={15} className="text-muted-foreground" />
+              <h2 className="text-[15px] font-medium tracking-tight">{selected}</h2>
               {files.find(f => f.filename === selected)?.type && (
                 <TypeBadge type={files.find(f => f.filename === selected)!.type} />
               )}
             </div>
             {loading ? (
-              <div className="text-xs text-white/25">Loading...</div>
+              <div className="text-[12px] text-muted-foreground">Loading...</div>
             ) : (
-              <pre className="text-xs text-white/60 whitespace-pre-wrap font-mono leading-relaxed bg-white/[0.02] rounded-lg p-4 border border-white/5">
+              <pre className="text-[12px] text-foreground/80 whitespace-pre-wrap font-mono leading-relaxed surface p-5">
                 {content}
               </pre>
             )}
@@ -177,13 +148,29 @@ export function MemoryView() {
         ) : (
           <div className="h-full flex items-center justify-center">
             <div className="text-center">
-              <BookOpen size={32} className="mx-auto mb-3 text-white/8" />
-              <p className="text-sm text-white/20">Select a memory to view</p>
-              <p className="text-[11px] text-white/10 mt-1">Memories are Mimi's persistent knowledge</p>
+              <BookOpen size={28} strokeWidth={1.4} className="mx-auto mb-3 text-muted-foreground/40" />
+              <p className="text-[13px] text-muted-foreground">Select a memory to view</p>
+              <p className="text-[11px] text-muted-foreground/60 mt-1">Mimi's persistent recollections.</p>
             </div>
           </div>
         )}
-      </div>
+      </section>
     </div>
+  )
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={[
+        'px-2 py-0.5 rounded-md text-[10px] uppercase tracking-wider border transition-colors',
+        active
+          ? 'border-border bg-accent text-foreground'
+          : 'border-border/60 bg-transparent text-muted-foreground hover:text-foreground hover:bg-accent/60',
+      ].join(' ')}
+    >
+      {children}
+    </button>
   )
 }

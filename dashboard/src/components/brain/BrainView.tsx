@@ -8,7 +8,7 @@ export function BrainView({ status, graph }: { status: Status | null; graph: Gra
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null)
 
   return (
-    <div className="absolute inset-0 overflow-hidden">
+    <div className="absolute inset-0 overflow-hidden bg-background">
       <BrainGraph graph={graph} onNodeClick={setSelectedNode} />
       <StatsHUD status={status} stats={status?.brain_stats ?? null} />
       {selectedNode && (

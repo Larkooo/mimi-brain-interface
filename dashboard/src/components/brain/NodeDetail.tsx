@@ -24,7 +24,7 @@ export function NodeDetail({ node, onClose }: { node: GraphNode; onClose: () => 
     >
       <button
         onClick={onClose}
-        className="absolute top-2 right-2 text-white/30 hover:text-white/60 transition-colors"
+        className="absolute top-2 right-2 text-muted-foreground/70 hover:text-foreground/70 transition-colors"
       >
         <X size={14} />
       </button>
@@ -35,12 +35,12 @@ export function NodeDetail({ node, onClose }: { node: GraphNode; onClose: () => 
           style={{ backgroundColor: color, boxShadow: `0 0 8px ${color}` }}
         />
         <div>
-          <div className="text-sm font-medium text-white/90">{node.name}</div>
-          <div className="text-[10px] text-white/40 uppercase tracking-wider">{node.type}</div>
+          <div className="text-sm font-medium text-foreground">{node.name}</div>
+          <div className="text-[10px] text-muted-foreground/80 uppercase tracking-wider">{node.type}</div>
         </div>
       </div>
 
-      <div className="flex items-center gap-4 text-xs text-white/40 mb-2">
+      <div className="flex items-center gap-4 text-xs text-muted-foreground/80 mb-2">
         <span className="font-mono">ID: {node.id}</span>
         <span>{node.connections} connection{node.connections !== 1 ? 's' : ''}</span>
       </div>
@@ -49,8 +49,8 @@ export function NodeDetail({ node, onClose }: { node: GraphNode; onClose: () => 
         <div className="border-t border-white/6 pt-2 mt-2 space-y-1">
           {props.map(([key, value]) => (
             <div key={key} className="flex gap-2 text-xs">
-              <span className="text-white/40 font-mono">{key}:</span>
-              <span className="text-white/70 break-all">{String(value)}</span>
+              <span className="text-muted-foreground/80 font-mono">{key}:</span>
+              <span className="text-foreground/85 break-all">{String(value)}</span>
             </div>
           ))}
         </div>
