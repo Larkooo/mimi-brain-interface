@@ -14,11 +14,11 @@ import type {
 } from '../../hooks/useApi'
 import { Flame, Beef, Wheat, Droplet, Trash2, Plus, Target } from 'lucide-react'
 
-const ACCENT = 'oklch(0.78 0.14 268)'  // var(--brand)
-const ACCENT_FG = 'oklch(0.135 0.004 280)' // dark fg for accent buttons
-const SURFACE_BG = 'color-mix(in oklch, var(--card) 60%, transparent)'
-const SURFACE_BORDER = 'var(--border)'
-const CELL_BG = 'color-mix(in oklch, var(--muted) 80%, transparent)'
+const ACCENT = 'rgb(180, 170, 240)'
+const ACCENT_FG = 'rgb(20, 20, 24)'
+const SURFACE_BG = 'rgba(255, 255, 255, 0.10)'
+const SURFACE_BORDER = 'rgba(255, 255, 255, 0.14)'
+const CELL_BG = 'rgba(255, 255, 255, 0.06)'
 
 export function NutritionView() {
   const [today, setToday] = useState<NutritionDay | null>(null)

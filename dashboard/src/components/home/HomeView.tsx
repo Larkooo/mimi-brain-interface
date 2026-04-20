@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Status, ServiceInfo, LogEntry } from '../../hooks/useApi'
 import { getServices, getLogs, launchSession, createBackup } from '../../hooks/useApi'
 import { Activity, Cpu, Database, Radio, HardDrive, RotateCcw, Save, ArrowRight } from 'lucide-react'
-import { LiquidGlass } from '@/components/ui/liquid-glass'
+import { LiquidGL } from '@/components/ui/liquid-gl'
 
 interface Props { status: Status | null }
 
@@ -50,7 +50,7 @@ export function HomeView({ status }: Props) {
           className="text-[72px] leading-[0.95] font-semibold tracking-[-0.03em] max-w-3xl"
           style={{
             backgroundImage:
-              'linear-gradient(120deg, oklch(0.99 0 0) 0%, oklch(0.99 0 0) 60%, oklch(0.78 0.14 280) 100%)',
+              'linear-gradient(120deg, rgb(245,245,247) 0%, rgb(245,245,247) 60%, rgb(180,170,240) 100%)',
             WebkitBackgroundClip: 'text',
             WebkitTextFillColor: 'transparent',
             backgroundClip: 'text',
@@ -125,25 +125,25 @@ export function HomeView({ status }: Props) {
 
 function Stat({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: number | string }) {
   return (
-    <LiquidGlass radius={22} thickness={70} bezel={28} ior={2.4} className="px-5 py-4">
-      <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-2">
+    <LiquidGL radius={22} contentClassName="px-5 py-4">
+      <div className="flex items-center gap-1.5 text-[11px] text-foreground/65 mb-2">
         <Icon size={13} strokeWidth={1.6} />
         <span className="tracking-tight">{label}</span>
       </div>
-      <div className="text-[34px] font-semibold leading-none tracking-tight num">{value}</div>
-    </LiquidGlass>
+      <div className="text-[34px] font-semibold leading-none tracking-tight num text-foreground">{value}</div>
+    </LiquidGL>
   )
 }
 
 function Panel({ title, icon: Icon, children }: { title: string; icon: React.ElementType; children: React.ReactNode }) {
   return (
-    <LiquidGlass radius={28} thickness={90} bezel={40} ior={2.6} className="p-5">
+    <LiquidGL radius={26} contentClassName="p-5">
       <div className="flex items-center gap-2 mb-3">
-        <Icon size={14} strokeWidth={1.6} className="text-muted-foreground" />
-        <h3 className="text-[13px] font-medium tracking-tight">{title}</h3>
+        <Icon size={14} strokeWidth={1.6} className="text-foreground/65" />
+        <h3 className="text-[13px] font-medium tracking-tight text-foreground">{title}</h3>
       </div>
       <div>{children}</div>
-    </LiquidGlass>
+    </LiquidGL>
   )
 }
 
@@ -167,7 +167,7 @@ function ActionRow({ label, hint, busy, icon: Icon, onClick }: { label: string; 
       disabled={busy}
       className="w-full text-left py-3 px-3 -mx-3 rounded-xl disabled:opacity-50 transition-colors group"
       style={{ background: 'transparent' }}
-      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'oklch(1 0 0 / 0.06)' }}
+      onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.background = 'rgba(255,255,255,0.06)' }}
       onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.background = 'transparent' }}
     >
       <div className="flex items-center justify-between">
