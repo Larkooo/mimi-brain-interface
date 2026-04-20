@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { Status, ServiceInfo, LogEntry } from '../../hooks/useApi'
 import { getServices, getLogs, launchSession, createBackup } from '../../hooks/useApi'
 import { Activity, Cpu, Database, Radio, HardDrive, RotateCcw, Save, ArrowRight } from 'lucide-react'
+import { LiquidGlass } from '@/components/ui/liquid-glass'
 
 interface Props { status: Status | null }
 
@@ -124,25 +125,25 @@ export function HomeView({ status }: Props) {
 
 function Stat({ icon: Icon, label, value }: { icon: React.ElementType; label: string; value: number | string }) {
   return (
-    <div className="glass px-5 py-4">
+    <LiquidGlass radius={22} thickness={70} bezel={28} ior={2.4} className="px-5 py-4">
       <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground mb-2">
         <Icon size={13} strokeWidth={1.6} />
         <span className="tracking-tight">{label}</span>
       </div>
       <div className="text-[34px] font-semibold leading-none tracking-tight num">{value}</div>
-    </div>
+    </LiquidGlass>
   )
 }
 
 function Panel({ title, icon: Icon, children }: { title: string; icon: React.ElementType; children: React.ReactNode }) {
   return (
-    <div className="glass p-5">
+    <LiquidGlass radius={28} thickness={90} bezel={40} ior={2.6} className="p-5">
       <div className="flex items-center gap-2 mb-3">
         <Icon size={14} strokeWidth={1.6} className="text-muted-foreground" />
         <h3 className="text-[13px] font-medium tracking-tight">{title}</h3>
       </div>
       <div>{children}</div>
-    </div>
+    </LiquidGlass>
   )
 }
 
