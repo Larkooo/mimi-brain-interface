@@ -27,9 +27,9 @@ export function StatsHUD({ status, stats }: { status: Status | null; stats: Brai
               animation: 'pulse 2s ease-in-out infinite',
             }}
           />
-          <span className="text-sm font-medium text-white/90">{status?.name || 'Mimi'}</span>
+          <span className="text-sm font-medium text-foreground">{status?.name || 'Mimi'}</span>
         </div>
-        <div className="text-[10px] text-white/30 font-mono mt-1">
+        <div className="text-[10px] text-muted-foreground/70 font-mono mt-1">
           {status?.claude_version || 'connecting...'}
         </div>
       </div>
@@ -38,22 +38,22 @@ export function StatsHUD({ status, stats }: { status: Status | null; stats: Brai
       <div className="absolute top-4 right-4 glass px-4 py-3">
         <div className="flex gap-6">
           <div className="text-center">
-            <div className="text-2xl font-mono font-bold text-[#00d4ff]">
+            <div className="text-2xl font-mono font-bold text-foreground">
               {stats?.entities ?? '-'}
             </div>
-            <div className="text-[10px] text-white/30 uppercase tracking-wider">entities</div>
+            <div className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">entities</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-mono font-bold text-[#863bff]">
               {stats?.relationships ?? '-'}
             </div>
-            <div className="text-[10px] text-white/30 uppercase tracking-wider">links</div>
+            <div className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">links</div>
           </div>
           <div className="text-center">
             <div className="text-2xl font-mono font-bold text-[#00ffa3]">
               {status?.memory_files ?? '-'}
             </div>
-            <div className="text-[10px] text-white/30 uppercase tracking-wider">memories</div>
+            <div className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">memories</div>
           </div>
         </div>
       </div>
@@ -61,7 +61,7 @@ export function StatsHUD({ status, stats }: { status: Status | null; stats: Brai
       {/* Bottom-left: Entity type legend */}
       {stats && stats.entity_types.length > 0 && (
         <div className="absolute bottom-4 left-4 glass px-4 py-3">
-          <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">Entity Types</div>
+          <div className="text-[10px] text-muted-foreground/70 uppercase tracking-wider mb-2">Entity Types</div>
           <div className="flex flex-col gap-1.5">
             {stats.entity_types.map(([type, count]) => (
               <div key={type} className="flex items-center gap-2">
@@ -69,8 +69,8 @@ export function StatsHUD({ status, stats }: { status: Status | null; stats: Brai
                   className="w-2 h-2 rounded-full"
                   style={{ backgroundColor: TYPE_COLORS[type.toLowerCase()] || '#4d7cff' }}
                 />
-                <span className="text-xs text-white/60">{type}</span>
-                <span className="text-xs font-mono text-white/30">{count}</span>
+                <span className="text-xs text-foreground/70">{type}</span>
+                <span className="text-xs font-mono text-muted-foreground/70">{count}</span>
               </div>
             ))}
           </div>
@@ -80,12 +80,12 @@ export function StatsHUD({ status, stats }: { status: Status | null; stats: Brai
       {/* Bottom-right: Relationship type breakdown */}
       {stats && stats.relationship_types.length > 0 && (
         <div className="absolute bottom-4 right-4 glass px-4 py-3">
-          <div className="text-[10px] text-white/30 uppercase tracking-wider mb-2">Relationships</div>
+          <div className="text-[10px] text-muted-foreground/70 uppercase tracking-wider mb-2">Relationships</div>
           <div className="flex flex-col gap-1.5">
             {stats.relationship_types.map(([type, count]) => (
               <div key={type} className="flex items-center justify-between gap-4">
-                <span className="text-xs text-white/60">{type}</span>
-                <span className="text-xs font-mono text-white/40">{count}</span>
+                <span className="text-xs text-foreground/70">{type}</span>
+                <span className="text-xs font-mono text-muted-foreground/80">{count}</span>
               </div>
             ))}
           </div>

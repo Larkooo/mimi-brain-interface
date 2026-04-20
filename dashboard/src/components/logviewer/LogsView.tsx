@@ -33,7 +33,7 @@ export function LogsView() {
   }, [content])
 
   return (
-    <div className="p-8 pl-20 max-w-6xl mx-auto">
+    <div className="px-10 py-10 max-w-6xl mx-auto">
       <div className="flex items-baseline justify-between mb-6">
         <div className="flex items-center gap-2">
           <ScrollText size={18} strokeWidth={1.5} className="text-muted-foreground" />

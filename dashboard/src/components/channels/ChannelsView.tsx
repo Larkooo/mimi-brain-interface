@@ -52,28 +52,26 @@ export function ChannelsView({ channels, onRefresh }: { channels: Channel[]; onR
   }
 
   return (
-    <div className="max-w-2xl mx-auto py-10 px-6">
-      <div className="flex items-center justify-between mb-8">
-        <div className="flex items-center gap-3">
-          <Radio size={20} className="text-[#00d4ff]" />
-          <h1 className="text-lg font-medium text-white/90">Channels</h1>
+    <div>
+      <div className="flex items-center justify-between mb-6">
+        <div className="text-[12px] text-muted-foreground">
+          {channels.length} {channels.length === 1 ? 'channel' : 'channels'} configured
         </div>
         <Button
           size="sm"
           variant="outline"
-          className="border-white/10 text-white/60 hover:text-white/90"
           onClick={() => setAdding(!adding)}
+          className="h-8 px-3 text-[12px]"
         >
-          <Plus size={14} className="mr-1.5" />
-          Add
+          <Plus size={13} className="mr-1.5" />
+          New channel
         </Button>
       </div>
 
-      {/* Add channel form */}
       {adding && (
-        <div className="glass p-5 mb-6 space-y-4">
+        <div className="surface p-5 mb-5 space-y-4">
           <select
-            className="w-full h-9 rounded-md bg-white/5 border border-white/10 px-3 text-sm text-white/80"
+            className="w-full h-9 rounded-md bg-muted/40 border border-border px-3 text-sm"
             value={newType}
             onChange={e => setNewType(e.target.value)}
           >
@@ -83,7 +81,7 @@ export function ChannelsView({ channels, onRefresh }: { channels: Channel[]; onR
           </select>
 
           {info && (
-            <ol className="text-xs text-white/40 space-y-1 list-decimal list-inside">
+            <ol className="text-[11px] text-muted-foreground space-y-1 list-decimal list-inside">
               {info.instructions.map((step, i) => <li key={i}>{step}</li>)}
             </ol>
           )}
@@ -94,70 +92,66 @@ export function ChannelsView({ channels, onRefresh }: { channels: Channel[]; onR
               placeholder={info?.tokenLabel || 'Bot token...'}
               value={token}
               onChange={e => setToken(e.target.value)}
-              className="bg-white/5 border-white/10 text-white/80"
+              className="bg-muted/40 border-border"
             />
           )}
 
           <div className="flex gap-2">
             <Button size="sm" onClick={handleAdd} disabled={needsToken && !token.trim()}>
-              Add Channel
+              Add channel
             </Button>
-            <Button size="sm" variant="ghost" className="text-white/40" onClick={() => setAdding(false)}>
+            <Button size="sm" variant="ghost" onClick={() => setAdding(false)}>
               Cancel
             </Button>
           </div>
         </div>
       )}
 
-      {/* Channel list */}
       {channels.length === 0 && !adding ? (
-        <div className="text-center py-20">
-          <Radio size={32} className="mx-auto mb-3 text-white/10" />
-          <p className="text-sm text-white/30">No channels configured</p>
-          <p className="text-xs text-white/15 mt-1">Add a channel to connect Mimi to messaging platforms</p>
+        <div className="surface text-center py-16 px-6">
+          <Radio size={28} strokeWidth={1.4} className="mx-auto mb-3 text-muted-foreground/50" />
+          <p className="text-[13px] text-muted-foreground">No channels configured</p>
+          <p className="text-[11px] text-muted-foreground/60 mt-1">Add a channel to bridge Mimi to a messaging platform.</p>
         </div>
       ) : (
         <div className="space-y-2">
           {channels.map(ch => (
             <div key={ch.name}>
-              <div className="glass px-4 py-3 flex items-center justify-between">
-                <div className="flex items-center gap-3">
-                  <div
-                    className="w-2 h-2 rounded-full"
-                    style={{
-                      backgroundColor: ch.enabled ? '#00ffa3' : '#ff3d3d',
-                      boxShadow: ch.enabled ? '0 0 6px #00ffa3' : '0 0 6px #ff3d3d',
-                    }}
+              <div className="surface px-4 py-3 flex items-center justify-between">
+                <div className="flex items-center gap-3 min-w-0">
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full shrink-0 ${ch.enabled ? 'bg-success' : 'bg-muted-foreground/40'}`}
+                    style={ch.enabled ? { boxShadow: '0 0 6px var(--success)' } : undefined}
                   />
-                  <span className="text-sm font-medium text-white/80">{ch.name}</span>
-                  <span className="text-[10px] text-white/25 font-mono uppercase">{ch.type}</span>
+                  <span className="text-[13px] font-medium tracking-tight truncate">{ch.name}</span>
+                  <span className="text-[10px] text-muted-foreground font-mono uppercase">{ch.type}</span>
                 </div>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-0.5 shrink-0">
                   {(ch.type === 'telegram' || ch.type === 'discord') && (
                     <button
-                      className="p-1.5 text-white/25 hover:text-white/60 transition-colors"
+                      className="p-1.5 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-colors"
                       onClick={() => {
                         setConfiguring(configuring === ch.name ? null : ch.name)
                         setConfigToken('')
                       }}
                       title="Configure token"
                     >
-                      <Settings size={14} />
+                      <Settings size={13} />
                     </button>
                   )}
                   <button
-                    className={`p-1.5 transition-colors ${ch.enabled ? 'text-[#00ffa3]/60 hover:text-[#00ffa3]' : 'text-white/25 hover:text-white/60'}`}
+                    className={`p-1.5 rounded-md transition-colors ${ch.enabled ? 'text-success hover:bg-accent' : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent'}`}
                     onClick={async () => { await toggleChannel(ch.name); onRefresh() }}
                     title={ch.enabled ? 'Disable' : 'Enable'}
                   >
-                    <Power size={14} />
+                    <Power size={13} />
                   </button>
                   <button
-                    className="p-1.5 text-white/25 hover:text-red-400 transition-colors"
+                    className="p-1.5 rounded-md text-muted-foreground/60 hover:text-danger hover:bg-accent transition-colors"
                     onClick={async () => { await removeChannel(ch.name); onRefresh() }}
                     title="Remove"
                   >
-                    <Trash2 size={14} />
+                    <Trash2 size={13} />
                   </button>
                 </div>
               </div>
@@ -169,7 +163,7 @@ export function ChannelsView({ channels, onRefresh }: { channels: Channel[]; onR
                     value={configToken}
                     onChange={e => setConfigToken(e.target.value)}
                     onKeyDown={e => { if (e.key === 'Enter') handleConfigure(ch.name) }}
-                    className="bg-white/5 border-white/10 text-white/80 text-sm"
+                    className="bg-muted/40 border-border text-sm"
                   />
                   <Button size="sm" onClick={() => handleConfigure(ch.name)}>Save</Button>
                 </div>

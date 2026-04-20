@@ -14,6 +14,13 @@ import { LogsView } from './components/logviewer/LogsView'
 import { ServicesView } from './components/services/ServicesView'
 import { NutritionView } from './components/nutrition/NutritionView'
 
+const TITLES: Record<Exclude<View, 'home' | 'brain' | 'logs' | 'services' | 'nutrition' | 'memory'>, { title: string; subtitle: string }> = {
+  channels: { title: 'Channels',  subtitle: 'Inbound bridges Mimi answers on.' },
+  crons:    { title: 'Schedules', subtitle: 'Recurring prompts the scheduler fires on Mimi.' },
+  secrets:  { title: 'Secrets',   subtitle: 'API keys, tokens, and credentials in the keystore.' },
+  settings: { title: 'Settings',  subtitle: 'Runtime config and identity.' },
+}
+
 function App() {
   const { status, refresh } = useStatus()
   const [view, setView] = useState<View>('home')
@@ -38,24 +45,34 @@ function App() {
   return (
     <div className="min-h-screen bg-background text-foreground font-sans">
       <NavRail active={view} onChange={setView} />
-      {view === 'home' && <HomeView status={status} />}
-      {view === 'brain' && <BrainView status={status} graph={graph} />}
-      {view === 'memory' && <WithHeader title="Memory"><MemoryView /></WithHeader>}
-      {view === 'channels' && <WithHeader title="Channels"><ChannelsView channels={status?.channels ?? []} onRefresh={refresh} /></WithHeader>}
-      {view === 'crons' && <WithHeader title="Crons"><CronsView /></WithHeader>}
-      {view === 'secrets' && <WithHeader title="Secrets"><SecretsView /></WithHeader>}
-      {view === 'logs' && <LogsView />}
-      {view === 'services' && <ServicesView />}
-      {view === 'nutrition' && <NutritionView />}
-      {view === 'settings' && <WithHeader title="Settings"><SettingsView status={status} onRefresh={refresh} /></WithHeader>}
+      <main className="pl-[220px] relative min-h-screen">
+        {view === 'home' && <HomeView status={status} />}
+        {view === 'brain' && <BrainView status={status} graph={graph} />}
+        {view === 'logs' && <LogsView />}
+        {view === 'services' && <ServicesView />}
+        {view === 'nutrition' && <NutritionView />}
+        {view === 'memory' && <MemoryView />}
+        {(view === 'channels' || view === 'crons' || view === 'secrets' || view === 'settings') && (
+          <PageShell {...TITLES[view]}>
+            {view === 'channels' && <ChannelsView channels={status?.channels ?? []} onRefresh={refresh} />}
+            {view === 'crons'    && <CronsView />}
+            {view === 'secrets'  && <SecretsView />}
+            {view === 'settings' && <SettingsView status={status} onRefresh={refresh} />}
+          </PageShell>
+        )}
+      </main>
     </div>
   )
 }
 
-function WithHeader({ title, children }: { title: string; children: React.ReactNode }) {
+function PageShell({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return (
-    <div className="p-8 pl-20 max-w-5xl mx-auto">
-      <h1 className="text-2xl font-semibold tracking-tight mb-6">{title}</h1>
+    <div className="px-10 py-10 max-w-5xl mx-auto">
+      <header className="mb-8">
+        <div className="eyebrow mb-1.5">Section</div>
+        <h1 className="text-[26px] font-semibold tracking-tight leading-none">{title}</h1>
+        <p className="text-sm text-muted-foreground mt-2">{subtitle}</p>
+      </header>
       {children}
     </div>
   )
