@@ -43,10 +43,7 @@ function App() {
   }, [view])
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans relative overflow-x-hidden">
-      <div className="mesh-bg"><span /><i /></div>
-      <div className="mesh-bg-overlay" />
-
+    <div className="min-h-screen text-foreground font-sans relative overflow-x-hidden">
       <NavRail active={view} onChange={setView} />
 
       <main className="relative min-h-screen pb-32 z-10">
