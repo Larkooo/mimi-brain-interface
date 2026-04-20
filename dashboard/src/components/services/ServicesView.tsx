@@ -33,7 +33,7 @@ export function ServicesView() {
   }
 
   return (
-    <div className="px-10 py-10 max-w-4xl mx-auto">
+    <div className="px-8 pt-20 pb-8 max-w-4xl mx-auto">
       <div className="flex items-baseline justify-between mb-8">
         <div className="flex items-center gap-2">
           <HardDrive size={18} strokeWidth={1.5} className="text-muted-foreground" />

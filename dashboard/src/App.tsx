@@ -17,7 +17,7 @@ import { NutritionView } from './components/nutrition/NutritionView'
 const TITLES: Record<Exclude<View, 'home' | 'brain' | 'logs' | 'services' | 'nutrition' | 'memory'>, { title: string; subtitle: string }> = {
   channels: { title: 'Channels',  subtitle: 'Inbound bridges Mimi answers on.' },
   crons:    { title: 'Schedules', subtitle: 'Recurring prompts the scheduler fires on Mimi.' },
-  secrets:  { title: 'Secrets',   subtitle: 'API keys, tokens, and credentials in the keystore.' },
+  secrets:  { title: 'Secrets',   subtitle: 'Encrypted keystore — values never enter context.' },
   settings: { title: 'Settings',  subtitle: 'Runtime config and identity.' },
 }
 
@@ -43,9 +43,13 @@ function App() {
   }, [view])
 
   return (
-    <div className="min-h-screen bg-background text-foreground font-sans">
+    <div className="min-h-screen bg-background text-foreground font-sans relative overflow-x-hidden">
+      <div className="mesh-bg"><span /></div>
+      <div className="mesh-bg-overlay" />
+
       <NavRail active={view} onChange={setView} />
-      <main className="pl-[220px] relative min-h-screen">
+
+      <main className="relative min-h-screen pb-32 z-10">
         {view === 'home' && <HomeView status={status} />}
         {view === 'brain' && <BrainView status={status} graph={graph} />}
         {view === 'logs' && <LogsView />}
@@ -67,11 +71,11 @@ function App() {
 
 function PageShell({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return (
-    <div className="px-10 py-10 max-w-5xl mx-auto">
-      <header className="mb-8">
-        <div className="eyebrow mb-1.5">Section</div>
-        <h1 className="text-[26px] font-semibold tracking-tight leading-none">{title}</h1>
-        <p className="text-sm text-muted-foreground mt-2">{subtitle}</p>
+    <div className="px-8 pt-16 max-w-5xl mx-auto">
+      <header className="mb-10">
+        <div className="eyebrow mb-3">Section</div>
+        <h1 className="text-[40px] font-semibold tracking-tight leading-[1.05]">{title}</h1>
+        <p className="text-[15px] text-muted-foreground mt-3 max-w-xl leading-relaxed">{subtitle}</p>
       </header>
       {children}
     </div>
