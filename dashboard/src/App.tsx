@@ -44,7 +44,7 @@ function App() {
 
   return (
     <div className="min-h-screen bg-background text-foreground font-sans relative overflow-x-hidden">
-      <div className="mesh-bg"><span /></div>
+      <div className="mesh-bg"><span /><i /></div>
       <div className="mesh-bg-overlay" />
 
       <NavRail active={view} onChange={setView} />

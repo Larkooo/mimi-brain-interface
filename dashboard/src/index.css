@@ -55,7 +55,6 @@
 }
 
 :root {
-  /* Light kept as fallback; default ships dark. */
   --background: oklch(0.99 0.005 280);
   --foreground: oklch(0.18 0.01 280);
   --card: oklch(1 0 0);
@@ -79,7 +78,7 @@
   --chart-3: oklch(0.50 0 0);
   --chart-4: oklch(0.38 0 0);
   --chart-5: oklch(0.25 0 0);
-  --radius: 1.1rem;
+  --radius: 1.4rem;  /* a hair bigger so corners feel iOS-native */
   --sidebar: oklch(0.99 0.005 280);
   --sidebar-foreground: oklch(0.18 0.01 280);
   --sidebar-primary: oklch(0.18 0.01 280);
@@ -94,10 +93,9 @@
 }
 
 .dark {
-  /* Deep ink so the colored mesh underneath glows through. */
-  --background: oklch(0.10 0.012 280);
+  --background: oklch(0.09 0.012 280);
   --foreground: oklch(0.99 0 0);
-  --card: oklch(1 0 0 / 0.07);
+  --card: oklch(1 0 0 / 0.08);
   --card-foreground: oklch(0.99 0 0);
   --popover: oklch(0.18 0.012 280);
   --popover-foreground: oklch(0.99 0 0);
@@ -110,7 +108,7 @@
   --accent: oklch(1 0 0 / 0.10);
   --accent-foreground: oklch(0.99 0 0);
   --destructive: oklch(0.70 0.22 25);
-  --border: oklch(1 0 0 / 0.10);
+  --border: oklch(1 0 0 / 0.12);
   --input: oklch(1 0 0 / 0.14);
   --ring: oklch(0.70 0.10 290);
   --chart-1: oklch(0.85 0 0);
@@ -124,32 +122,32 @@
   --sidebar-primary-foreground: oklch(0.99 0 0);
   --sidebar-accent: oklch(1 0 0 / 0.10);
   --sidebar-accent-foreground: oklch(0.99 0 0);
-  --sidebar-border: oklch(1 0 0 / 0.10);
+  --sidebar-border: oklch(1 0 0 / 0.12);
   --sidebar-ring: oklch(0.70 0.10 290);
   --success: oklch(0.86 0.18 152);
   --warning: oklch(0.85 0.16 80);
   --danger: oklch(0.74 0.22 22);
 }
 
-/*
- * Liquid Glass mesh background.
- * Multiple oversized colored radial gradients orbit slowly, creating a rich
- * field for the glass surfaces above to refract / pick up tint.
- */
+/* ---------------------------------------------------------------------------
+ * Liquid Glass mesh — colored orbs that the glass refracts above.
+ * Punched up vs v1: more saturation, two extra orbs, slower drift, brighter.
+ * --------------------------------------------------------------------------- */
 @keyframes orb-drift-a {
-  0%   { transform: translate(0vw, 0vh) scale(1); }
-  50%  { transform: translate(8vw, 4vh) scale(1.08); }
-  100% { transform: translate(0vw, 0vh) scale(1); }
+  0%, 100% { transform: translate(0vw, 0vh) scale(1); }
+  50%      { transform: translate(10vw, 6vh) scale(1.10); }
 }
 @keyframes orb-drift-b {
-  0%   { transform: translate(0vw, 0vh) scale(1); }
-  50%  { transform: translate(-6vw, -3vh) scale(0.95); }
-  100% { transform: translate(0vw, 0vh) scale(1); }
+  0%, 100% { transform: translate(0vw, 0vh) scale(1); }
+  50%      { transform: translate(-8vw, -4vh) scale(0.95); }
 }
 @keyframes orb-drift-c {
-  0%   { transform: translate(0vw, 0vh) scale(1); }
-  50%  { transform: translate(4vw, -6vh) scale(1.05); }
-  100% { transform: translate(0vw, 0vh) scale(1); }
+  0%, 100% { transform: translate(0vw, 0vh) scale(1); }
+  50%      { transform: translate(6vw, -8vh) scale(1.08); }
+}
+@keyframes orb-drift-d {
+  0%, 100% { transform: translate(0vw, 0vh) scale(1); }
+  50%      { transform: translate(-7vw, 7vh) scale(1.04); }
 }
 
 @layer base {
@@ -162,14 +160,9 @@
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
-  /*
-   * Body background is the mesh's deep ink. The orbs are fixed siblings that
-   * float ABOVE the body but BELOW main content (z=0) thanks to z-index 0
-   * with isolation; main content gets z-index 1.
-   */
   body {
     @apply text-foreground;
-    background-color: oklch(0.10 0.012 280);
+    background-color: oklch(0.09 0.012 280);
     overflow-x: hidden;
     isolation: isolate;
   }
@@ -179,185 +172,270 @@
   }
 }
 
-/*
- * Animated colored orbs. They sit above the body bg but below the content
- * (which has its own stacking context). Heavy blur + screen blend produces
- * the lush mesh that the glass surfaces above can pick up tint from.
- */
 .mesh-bg {
   position: fixed;
   inset: -10vmax;
   z-index: 0;
   pointer-events: none;
-  filter: blur(60px) saturate(1.2);
+  filter: blur(70px) saturate(1.6);
 }
 .mesh-bg::before,
 .mesh-bg::after,
-.mesh-bg > span {
+.mesh-bg > span,
+.mesh-bg > i {
   content: "";
   position: absolute;
   border-radius: 50%;
   mix-blend-mode: screen;
-  opacity: 0.85;
   will-change: transform;
 }
-/* Coral/peach orb top-left */
+/* Coral / peach — top-left */
 .mesh-bg::before {
-  width: 60vmax; height: 60vmax;
-  left: -10vmax; top: -10vmax;
-  background: radial-gradient(circle, oklch(0.72 0.20 30 / 0.55), transparent 60%);
-  animation: orb-drift-a 28s ease-in-out infinite;
+  width: 65vmax; height: 65vmax;
+  left: -8vmax; top: -10vmax;
+  background: radial-gradient(circle, oklch(0.72 0.24 28 / 0.75), transparent 60%);
+  animation: orb-drift-a 30s ease-in-out infinite;
+  opacity: 0.95;
 }
-/* Violet orb bottom-right */
+/* Magenta / violet — bottom-right */
 .mesh-bg::after {
   width: 70vmax; height: 70vmax;
-  right: -15vmax; bottom: -10vmax;
-  background: radial-gradient(circle, oklch(0.55 0.24 295 / 0.55), transparent 60%);
-  animation: orb-drift-b 36s ease-in-out infinite;
+  right: -12vmax; bottom: -10vmax;
+  background: radial-gradient(circle, oklch(0.55 0.30 320 / 0.80), transparent 60%);
+  animation: orb-drift-b 38s ease-in-out infinite;
+  opacity: 0.95;
 }
-/* Cyan orb mid */
+/* Cyan — middle */
 .mesh-bg > span {
-  width: 50vmax; height: 50vmax;
-  left: 30vw; top: 20vh;
-  background: radial-gradient(circle, oklch(0.72 0.18 220 / 0.50), transparent 60%);
-  animation: orb-drift-c 32s ease-in-out infinite;
+  width: 55vmax; height: 55vmax;
+  left: 28vw; top: 18vh;
+  background: radial-gradient(circle, oklch(0.72 0.22 220 / 0.70), transparent 60%);
+  animation: orb-drift-c 34s ease-in-out infinite;
+  opacity: 0.95;
 }
-/* Subtle vignette + grain on top of the mesh — sells the "real glass" feel. */
+/* Lime / chartreuse — top-right (small, optional) */
+.mesh-bg > i {
+  width: 35vmax; height: 35vmax;
+  right: 5vw; top: -5vh;
+  background: radial-gradient(circle, oklch(0.86 0.22 150 / 0.55), transparent 60%);
+  animation: orb-drift-d 42s ease-in-out infinite;
+  opacity: 0.85;
+}
+
+/* Vignette + ultra-fine grain over the mesh, sells "real material" feel. */
 .mesh-bg-overlay {
   position: fixed; inset: 0;
   z-index: 0; pointer-events: none;
   background:
-    radial-gradient(ellipse at center, transparent 40%, oklch(0 0 0 / 0.55) 100%),
-    repeating-linear-gradient(0deg, transparent 0 2px, oklch(1 0 0 / 0.012) 2px 3px);
+    radial-gradient(ellipse at center, transparent 35%, oklch(0 0 0 / 0.55) 100%),
+    repeating-linear-gradient(0deg, transparent 0 2px, oklch(1 0 0 / 0.014) 2px 3px);
 }
 
+/* ---------------------------------------------------------------------------
+ * Liquid Glass surfaces (v2)
+ *
+ * What changed vs v1 to sell the "real Apple glass" feel:
+ *   1. Heavier saturate + brightness on backdrop-filter — the backdrop
+ *      reads more colorful, like a real lens
+ *   2. Multi-layer rim light: bright top stroke + brighter top-left specular
+ *      via a ::before pseudo, plus a faint bottom shadow for depth
+ *   3. ::after specular highlight — a tiny radial gloss in the top-left
+ *      corner suggesting an off-screen light source
+ *   4. Outer "ring" shadow simulating the dark edge of a thick piece of glass
+ *      (very subtle 1-2px outer dark line outside the bright rim)
+ *   5. Bigger radius default (~32px), iOS-native curvature
+ * --------------------------------------------------------------------------- */
+
 @layer components {
-  /*
-   * Liquid Glass surface.
-   * - Highly translucent so the mesh below tints through
-   * - Heavy backdrop blur + saturation boost = real refraction feel
-   * - Top-edge inner highlight via inset shadow (rim light)
-   * - Soft outer drop shadow grounds it against the mesh
-   * - Generous radius (~22px) feels iOS/visionOS native
-   */
   .glass {
     position: relative;
-    background: linear-gradient(
-      180deg,
-      oklch(1 0 0 / 0.16),
-      oklch(1 0 0 / 0.06)
-    );
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
+    isolation: isolate;
+    background:
+      linear-gradient(
+        180deg,
+        oklch(1 0 0 / 0.18) 0%,
+        oklch(1 0 0 / 0.08) 100%
+      );
+    backdrop-filter: blur(32px) saturate(220%) brightness(1.08);
+    -webkit-backdrop-filter: blur(32px) saturate(220%) brightness(1.08);
     border-radius: var(--radius-xl);
-    border: 1px solid oklch(1 0 0 / 0.10);
-    box-shadow:
-      inset 0 1px 0 0 oklch(1 0 0 / 0.22),     /* rim light top */
-      inset 0 -1px 0 0 oklch(0 0 0 / 0.10),    /* shadow bottom */
-      0 12px 40px -16px oklch(0 0 0 / 0.55),   /* drop shadow */
-      0 2px 6px -2px oklch(0 0 0 / 0.30);
-  }
-
-  /* Stronger frost — for deeper containers, modals, the nav. */
-  .glass-strong {
-    position: relative;
-    background: linear-gradient(
-      180deg,
-      oklch(1 0 0 / 0.18),
-      oklch(1 0 0 / 0.08)
-    );
-    backdrop-filter: blur(40px) saturate(200%);
-    -webkit-backdrop-filter: blur(40px) saturate(200%);
-    border-radius: var(--radius-2xl);
     border: 1px solid oklch(1 0 0 / 0.14);
     box-shadow:
-      inset 0 1px 0 0 oklch(1 0 0 / 0.28),
-      inset 0 -1px 0 0 oklch(0 0 0 / 0.12),
-      0 20px 60px -20px oklch(0 0 0 / 0.65),
-      0 4px 12px -4px oklch(0 0 0 / 0.40);
+      /* Outer ring — the dark thin edge of the glass */
+      0 0 0 0.5px oklch(0 0 0 / 0.30),
+      /* Drop shadow grounding it */
+      0 22px 60px -20px oklch(0 0 0 / 0.55),
+      0 6px 18px -6px oklch(0 0 0 / 0.30),
+      /* Inner top rim — brightest line catching light */
+      inset 0 1px 0 0 oklch(1 0 0 / 0.40),
+      inset 0 1.5px 0 0 oklch(1 0 0 / 0.18),
+      /* Inner bottom shadow — the glass has thickness */
+      inset 0 -1px 0 0 oklch(0 0 0 / 0.18),
+      /* Soft inner side highlights */
+      inset 1px 0 0 0 oklch(1 0 0 / 0.10),
+      inset -1px 0 0 0 oklch(1 0 0 / 0.06);
   }
-
-  /* Subtler glass — for input fields and small chips inside a glass card. */
-  .glass-thin {
-    background: oklch(1 0 0 / 0.07);
-    backdrop-filter: blur(12px) saturate(140%);
-    -webkit-backdrop-filter: blur(12px) saturate(140%);
-    border-radius: var(--radius-lg);
-    border: 1px solid oklch(1 0 0 / 0.08);
-    box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.10);
+  /* Specular highlight — a tiny diagonal gloss in the top-left corner */
+  .glass::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        80% 60% at 15% 0%,
+        oklch(1 0 0 / 0.18) 0%,
+        oklch(1 0 0 / 0.05) 30%,
+        transparent 60%
+      );
+    mix-blend-mode: screen;
+    z-index: 0;
   }
-
-  /* "surface" stays available as an alias so older view code keeps working. */
-  .surface {
+  /* Children of .glass need positioning so they sit above the gloss layer */
+  .glass > * {
     position: relative;
-    background: linear-gradient(
-      180deg,
-      oklch(1 0 0 / 0.16),
-      oklch(1 0 0 / 0.06)
-    );
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    border-radius: var(--radius-xl);
+    z-index: 1;
+  }
+
+  /* Stronger frost — for Dock-style nav and modals */
+  .glass-strong {
+    position: relative;
+    isolation: isolate;
+    background:
+      linear-gradient(
+        180deg,
+        oklch(1 0 0 / 0.22) 0%,
+        oklch(1 0 0 / 0.10) 100%
+      );
+    backdrop-filter: blur(48px) saturate(260%) brightness(1.12);
+    -webkit-backdrop-filter: blur(48px) saturate(260%) brightness(1.12);
+    border-radius: var(--radius-2xl);
+    border: 1px solid oklch(1 0 0 / 0.18);
+    box-shadow:
+      0 0 0 0.5px oklch(0 0 0 / 0.40),
+      0 30px 80px -24px oklch(0 0 0 / 0.65),
+      0 8px 24px -8px oklch(0 0 0 / 0.40),
+      inset 0 1.5px 0 0 oklch(1 0 0 / 0.55),
+      inset 0 2.5px 0 0 oklch(1 0 0 / 0.20),
+      inset 0 -1px 0 0 oklch(0 0 0 / 0.22),
+      inset 1px 0 0 0 oklch(1 0 0 / 0.12),
+      inset -1px 0 0 0 oklch(1 0 0 / 0.08);
+  }
+  .glass-strong::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        70% 60% at 20% 0%,
+        oklch(1 0 0 / 0.22) 0%,
+        oklch(1 0 0 / 0.06) 35%,
+        transparent 65%
+      );
+    mix-blend-mode: screen;
+    z-index: 0;
+  }
+  .glass-strong > * { position: relative; z-index: 1; }
+
+  /* Subtler glass — input fields and inline chips inside a glass card. */
+  .glass-thin {
+    background: oklch(1 0 0 / 0.08);
+    backdrop-filter: blur(14px) saturate(160%);
+    -webkit-backdrop-filter: blur(14px) saturate(160%);
+    border-radius: var(--radius-lg);
     border: 1px solid oklch(1 0 0 / 0.10);
     box-shadow:
-      inset 0 1px 0 0 oklch(1 0 0 / 0.22),
-      inset 0 -1px 0 0 oklch(0 0 0 / 0.10),
-      0 12px 40px -16px oklch(0 0 0 / 0.55),
-      0 2px 6px -2px oklch(0 0 0 / 0.30);
+      inset 0 1px 0 0 oklch(1 0 0 / 0.16),
+      inset 0 -1px 0 0 oklch(0 0 0 / 0.10);
   }
 
-  /* Eyebrow caption */
+  .surface {
+    position: relative;
+    isolation: isolate;
+    background:
+      linear-gradient(
+        180deg,
+        oklch(1 0 0 / 0.18) 0%,
+        oklch(1 0 0 / 0.08) 100%
+      );
+    backdrop-filter: blur(32px) saturate(220%) brightness(1.08);
+    -webkit-backdrop-filter: blur(32px) saturate(220%) brightness(1.08);
+    border-radius: var(--radius-xl);
+    border: 1px solid oklch(1 0 0 / 0.14);
+    box-shadow:
+      0 0 0 0.5px oklch(0 0 0 / 0.30),
+      0 22px 60px -20px oklch(0 0 0 / 0.55),
+      0 6px 18px -6px oklch(0 0 0 / 0.30),
+      inset 0 1px 0 0 oklch(1 0 0 / 0.40),
+      inset 0 1.5px 0 0 oklch(1 0 0 / 0.18),
+      inset 0 -1px 0 0 oklch(0 0 0 / 0.18),
+      inset 1px 0 0 0 oklch(1 0 0 / 0.10),
+      inset -1px 0 0 0 oklch(1 0 0 / 0.06);
+  }
+  .surface::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background:
+      radial-gradient(
+        80% 60% at 15% 0%,
+        oklch(1 0 0 / 0.16) 0%,
+        oklch(1 0 0 / 0.04) 32%,
+        transparent 60%
+      );
+    mix-blend-mode: screen;
+    z-index: 0;
+  }
+  .surface > * { position: relative; z-index: 1; }
+
   .eyebrow {
     @apply text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-medium;
   }
-
-  /* Tabular numerics, used for stats / counters / IDs */
   .num {
     font-variant-numeric: tabular-nums;
     font-feature-settings: "tnum", "ss01";
   }
-
-  /* Pill chip */
   .chip {
     @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] text-foreground;
-    background: oklch(1 0 0 / 0.10);
-    border: 1px solid oklch(1 0 0 / 0.08);
-    backdrop-filter: blur(10px) saturate(140%);
-    -webkit-backdrop-filter: blur(10px) saturate(140%);
+    background: oklch(1 0 0 / 0.12);
+    border: 1px solid oklch(1 0 0 / 0.10);
+    backdrop-filter: blur(12px) saturate(160%);
+    -webkit-backdrop-filter: blur(12px) saturate(160%);
+    box-shadow: inset 0 1px 0 0 oklch(1 0 0 / 0.18);
   }
-
-  /* Glass button — primary action */
   .btn-glass {
     @apply inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 rounded-full text-[12px] font-medium transition-all duration-200;
-    background: linear-gradient(180deg, oklch(1 0 0 / 0.22), oklch(1 0 0 / 0.10));
+    background: linear-gradient(180deg, oklch(1 0 0 / 0.26), oklch(1 0 0 / 0.10));
     color: var(--foreground);
-    border: 1px solid oklch(1 0 0 / 0.15);
-    backdrop-filter: blur(20px) saturate(180%);
-    -webkit-backdrop-filter: blur(20px) saturate(180%);
+    border: 1px solid oklch(1 0 0 / 0.18);
+    backdrop-filter: blur(20px) saturate(200%);
+    -webkit-backdrop-filter: blur(20px) saturate(200%);
     box-shadow:
-      inset 0 1px 0 0 oklch(1 0 0 / 0.30),
+      inset 0 1px 0 0 oklch(1 0 0 / 0.40),
+      inset 0 -1px 0 0 oklch(0 0 0 / 0.16),
       0 4px 14px -6px oklch(0 0 0 / 0.45);
   }
   .btn-glass:hover {
-    background: linear-gradient(180deg, oklch(1 0 0 / 0.30), oklch(1 0 0 / 0.14));
+    background: linear-gradient(180deg, oklch(1 0 0 / 0.34), oklch(1 0 0 / 0.16));
     transform: translateY(-0.5px);
   }
   .btn-glass:active {
     transform: translateY(0);
     box-shadow:
-      inset 0 1px 0 0 oklch(1 0 0 / 0.20),
+      inset 0 1px 0 0 oklch(1 0 0 / 0.22),
       0 2px 8px -4px oklch(0 0 0 / 0.40);
   }
-
   .row {
     @apply flex items-center justify-between rounded-xl px-3 py-2 transition-colors;
   }
-  .row:hover {
-    background: oklch(1 0 0 / 0.06);
-  }
+  .row:hover { background: oklch(1 0 0 / 0.06); }
 }
 
-/* Custom scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
