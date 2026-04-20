@@ -15,10 +15,10 @@ import { ServicesView } from './components/services/ServicesView'
 import { NutritionView } from './components/nutrition/NutritionView'
 
 const TITLES: Record<Exclude<View, 'home' | 'brain' | 'logs' | 'services' | 'nutrition' | 'memory'>, { title: string; subtitle: string }> = {
-  channels: { title: 'Channels',  subtitle: 'Inbound bridges Mimi answers on.' },
-  crons:    { title: 'Schedules', subtitle: 'Recurring prompts the scheduler fires on Mimi.' },
-  secrets:  { title: 'Secrets',   subtitle: 'Encrypted keystore — values never enter context.' },
-  settings: { title: 'Settings',  subtitle: 'Runtime config and identity.' },
+  channels: { title: 'channels',  subtitle: 'inbound bridges mimi answers on.' },
+  crons:    { title: 'schedules', subtitle: 'recurring prompts the scheduler fires on mimi.' },
+  secrets:  { title: 'secrets',   subtitle: 'encrypted keystore — values never enter context.' },
+  settings: { title: 'settings',  subtitle: 'runtime config and identity.' },
 }
 
 function App() {
@@ -43,10 +43,9 @@ function App() {
   }, [view])
 
   return (
-    <div className="min-h-screen text-foreground font-sans relative overflow-x-hidden">
+    <div className="min-h-screen text-foreground font-mono relative">
       <NavRail active={view} onChange={setView} />
-
-      <main className="relative min-h-screen pb-32 z-10">
+      <main className="relative min-h-screen pt-11">
         {view === 'home' && <HomeView status={status} />}
         {view === 'brain' && <BrainView status={status} graph={graph} />}
         {view === 'logs' && <LogsView />}
@@ -68,11 +67,13 @@ function App() {
 
 function PageShell({ title, subtitle, children }: { title: string; subtitle: string; children: React.ReactNode }) {
   return (
-    <div className="px-8 pt-16 max-w-5xl mx-auto">
+    <div className="px-8 pt-10 pb-20 max-w-6xl mx-auto">
       <header className="mb-10">
-        <div className="eyebrow mb-3">Section</div>
-        <h1 className="text-[40px] font-semibold tracking-tight leading-[1.05]">{title}</h1>
-        <p className="text-[15px] text-muted-foreground mt-3 max-w-xl leading-relaxed">{subtitle}</p>
+        <div className="flex items-baseline gap-2 mb-1">
+          <span style={{ color: 'var(--accentphosphor)' }}>&gt;</span>
+          <h1 className="text-[20px] font-semibold tracking-wide lowercase">{title}</h1>
+        </div>
+        <p className="text-[13px] text-muted-foreground ml-4">{subtitle}</p>
       </header>
       {children}
     </div>
