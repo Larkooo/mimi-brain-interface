@@ -52,7 +52,7 @@ export function NutritionView() {
   }
 
   return (
-    <div className="px-10 py-10 max-w-5xl mx-auto">
+    <div className="px-8 pt-20 pb-8 max-w-5xl mx-auto">
       <header className="mb-8">
         <div className="eyebrow mb-1.5">Section</div>
         <div className="flex items-baseline justify-between">
