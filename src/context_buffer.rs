@@ -49,6 +49,7 @@ pub struct Entry {
 pub enum Kind {
     User,
     Assistant,
+    Reaction,
 }
 
 pub fn append_user(source: &str, chat_id: &str, user_name: &str, text: &str) {
@@ -70,6 +71,28 @@ pub fn append_assistant(source: &str, chat_id: &str, text: &str) {
         user_name: String::new(),
         kind: Kind::Assistant,
         text: text.into(),
+    });
+}
+
+/// Record that someone added an emoji reaction to one of our assistant
+/// messages. Surfaces in the next turn's `<recent_context>` preamble so mimi
+/// sees inline feedback like `[2m ago · splitterr@discord 👍] reacted
+/// <:roflmao:> to my msg: "…"` and can calibrate register in real time.
+pub fn append_reaction(
+    source: &str,
+    chat_id: &str,
+    reactor_name: &str,
+    emoji: &str,
+    target_excerpt: &str,
+) {
+    let text = format!("reacted {emoji} to my msg: \"{target_excerpt}\"");
+    append(Entry {
+        ts: Utc::now(),
+        source: source.into(),
+        chat_id: chat_id.into(),
+        user_name: reactor_name.into(),
+        kind: Kind::Reaction,
+        text,
     });
 }
 
@@ -168,6 +191,13 @@ pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<Strin
                 }
             }
             Kind::Assistant => format!("assistant@{}", e.source),
+            Kind::Reaction => {
+                if e.user_name.is_empty() {
+                    format!("reaction@{}", e.source)
+                } else {
+                    format!("{}@{} 👍", e.user_name, e.source)
+                }
+            }
         };
         let text = truncate(&e.text, 400);
         out.push_str(&format!("[{age} · {who}] {text}\n"));
