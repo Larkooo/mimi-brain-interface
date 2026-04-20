@@ -689,6 +689,89 @@ async fn edit_message(
 
 // --- Gateway loop ---
 
+/// Handle a `MESSAGE_REACTION_ADD` gateway event. If the target message was
+/// authored by this bot and the reactor isn't the bot itself, append a
+/// reaction entry to the cross-channel context buffer so the next user turn
+/// sees inline feedback like `[2m ago · splitterr@discord 👍] reacted
+/// <:roflmao:> to my msg: "..."`.
+async fn handle_reaction_add(client: &reqwest::Client, token: &str, d: &Value) {
+    let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
+    if bot_id == 0 {
+        return;
+    }
+
+    let reactor_id: u64 = d.get("user_id").and_then(|x| x.as_str())
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    if reactor_id == bot_id { return; }
+
+    // Gateway v10 includes `message_author_id` on MESSAGE_REACTION_ADD so we
+    // can filter cheaply without an extra REST roundtrip. Only process
+    // reactions to our own messages.
+    let author_id: u64 = d.get("message_author_id").and_then(|x| x.as_str())
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    if author_id != bot_id { return; }
+
+    let channel_id: u64 = d.get("channel_id").and_then(|x| x.as_str())
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    let message_id: u64 = d.get("message_id").and_then(|x| x.as_str())
+        .and_then(|s| s.parse().ok()).unwrap_or(0);
+    if channel_id == 0 || message_id == 0 { return; }
+
+    let emoji_name = d.pointer("/emoji/name").and_then(|x| x.as_str()).unwrap_or("?");
+    let emoji_id = d.pointer("/emoji/id").and_then(|x| x.as_str());
+    let emoji_display = match emoji_id {
+        Some(id) => format!("<:{emoji_name}:{id}>"),
+        None => emoji_name.to_string(),
+    };
+
+    let reactor_name = d.pointer("/member/user/global_name").and_then(|x| x.as_str())
+        .or_else(|| d.pointer("/member/user/username").and_then(|x| x.as_str()))
+        .unwrap_or("someone")
+        .to_string();
+
+    // Fetch the target message's content so the signal has substance. One
+    // REST call per reaction — cheap at channel volumes.
+    let excerpt = fetch_message_excerpt(client, token, channel_id, message_id).await
+        .unwrap_or_else(|| format!("msg {message_id}"));
+
+    eprintln!(
+        "discord: reaction {emoji_display} from {reactor_name} on our msg {message_id}"
+    );
+
+    crate::context_buffer::append_reaction(
+        "discord",
+        &channel_id.to_string(),
+        &reactor_name,
+        &emoji_display,
+        &excerpt,
+    );
+}
+
+/// Fetch a short excerpt of a message's content via the REST API. Returns
+/// None on error; the caller renders a fallback.
+async fn fetch_message_excerpt(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: u64,
+    message_id: u64,
+) -> Option<String> {
+    let url = format!(
+        "https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}"
+    );
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bot {token}"))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() { return None; }
+    let v: Value = resp.json().await.ok()?;
+    let content = v.get("content").and_then(|x| x.as_str()).unwrap_or("");
+    let cleaned: String = content.chars().take(160).collect();
+    let cleaned = cleaned.replace('\n', " ");
+    Some(if content.chars().count() > 160 { format!("{cleaned}…") } else { cleaned })
+}
+
 async fn run_gateway(
     token: &str,
     to_claude: &mpsc::Sender<UserTurn>,
@@ -761,6 +844,13 @@ async fn run_gateway(
             if let Some(id) = v.pointer("/d/user/id").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()) {
                 BOT_USER_ID.store(id, Ordering::SeqCst);
                 eprintln!("discord: ready, bot_user_id={id}");
+            }
+            continue;
+        }
+
+        if event == "MESSAGE_REACTION_ADD" {
+            if let Some(d) = v.get("d") {
+                handle_reaction_add(client, token, d).await;
             }
             continue;
         }
