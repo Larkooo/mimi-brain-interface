@@ -1,7 +1,8 @@
-export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'nutrition' | 'settings'
+export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'nutrition' | 'tasks' | 'settings'
 
 const navItems: { id: View; label: string; cmd: string }[] = [
   { id: 'home',      label: 'overview',   cmd: 'o' },
+  { id: 'tasks',     label: 'tasks',      cmd: 't' },
   { id: 'brain',     label: 'knowledge',  cmd: 'k' },
   { id: 'memory',    label: 'memory',     cmd: 'm' },
   { id: 'channels',  label: 'channels',   cmd: 'c' },

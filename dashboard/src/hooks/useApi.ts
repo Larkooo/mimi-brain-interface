@@ -376,3 +376,99 @@ export async function logNutrition(meal: {
 export async function deleteNutritionLog(id: number) {
   return api(`/api/nutrition/log/${id}`, { method: 'DELETE' });
 }
+
+// --- Tasks ---
+
+export interface Task {
+  id: number;
+  parent_id: number | null;
+  title: string;
+  description: string;
+  status: 'pending' | 'running' | 'blocked' | 'done' | 'failed' | 'cancelled';
+  origin_channel: string | null;
+  origin_chat_id: string | null;
+  origin_user: string | null;
+  assignee: string | null;
+  depth: number;
+  progress: number;
+  metadata: string;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface TaskTreeNode extends Task {
+  path: string;
+}
+
+export interface TaskUpdate {
+  id: number;
+  task_id: number;
+  note: string | null;
+  status_before: string | null;
+  status_after: string | null;
+  author: string | null;
+  created_at: string;
+}
+
+export interface TaskDetail extends Task {
+  updates: TaskUpdate[];
+  children: Task[];
+}
+
+export async function getTasks(q?: { status?: string; channel?: string; parent?: string; limit?: number }): Promise<Task[]> {
+  const params = new URLSearchParams();
+  if (q?.status) params.set('status', q.status);
+  if (q?.channel) params.set('channel', q.channel);
+  if (q?.parent) params.set('parent', q.parent);
+  if (q?.limit) params.set('limit', String(q.limit));
+  const s = params.toString();
+  return api(`/api/tasks${s ? '?' + s : ''}`);
+}
+
+export async function getTaskTree(): Promise<TaskTreeNode[]> {
+  return api('/api/tasks/tree');
+}
+
+export async function getTaskSummary(): Promise<Record<string, number>> {
+  return api('/api/tasks/summary');
+}
+
+export async function getTask(id: number): Promise<TaskDetail> {
+  return api(`/api/tasks/${id}`);
+}
+
+export async function createTask(body: {
+  title: string;
+  description?: string;
+  parent_id?: number | null;
+  origin_channel?: string;
+  origin_chat_id?: string;
+  origin_user?: string;
+  assignee?: string;
+}): Promise<Task> {
+  return api('/api/tasks', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function updateTask(id: number, body: {
+  status?: string;
+  progress?: number;
+  assignee?: string;
+  note?: string;
+  author?: string;
+}): Promise<Task> {
+  return api(`/api/tasks/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteTask(id: number) {
+  return api(`/api/tasks/${id}`, { method: 'DELETE' });
+}
