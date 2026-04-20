@@ -21,10 +21,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-const MAX_LINES: usize = 200;
+const MAX_LINES: usize = 300;
 const CONTEXT_LOOKBACK: usize = 20;
 const SAME_CHANNEL_WINDOW_SECS: i64 = 60;
 const FIRST_TURN_LOOKBACK: usize = 40;
+/// Passive-awareness raw tail: include up to N recent same-channel entries
+/// in every preamble, regardless of age, so mimi catches up on chatter she
+/// wasn't triggered on. Bigger = more context tokens per turn.
+const SAME_CHANNEL_TAIL: usize = 8;
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
 
@@ -155,25 +159,48 @@ pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<Strin
         .insert(key);
     let lookback = if is_first_turn { FIRST_TURN_LOOKBACK } else { CONTEXT_LOOKBACK };
 
-    let mut picks: Vec<&Entry> = entries
+    // Two streams feed the preamble:
+    //   • cross_channel: msgs from OTHER channels — capped at `lookback`
+    //   • same_channel_tail: latest N msgs from the SAME channel, unconditional,
+    //     so mimi has a passive window on unmentioned chatter.
+    // We merge them by timestamp for natural reading order. Bump the cap to
+    // `FIRST_TURN_LOOKBACK` on first-turn-after-restart to recover the full log.
+    let same_channel_cap = if is_first_turn { FIRST_TURN_LOOKBACK } else { SAME_CHANNEL_TAIL };
+
+    let mut cross_channel: Vec<&Entry> = entries
         .iter()
         .rev()
-        .filter(|e| {
-            let same_channel = e.source == current_source && e.chat_id == current_chat_id;
-            if same_channel {
-                // On the first turn after a restart, include same-channel
-                // history so we recover the rolling log. Otherwise skip it —
-                // the subprocess already holds its own conversation state and
-                // the preamble's job is cross-channel awareness.
-                is_first_turn
-                    || (now - e.ts).num_seconds() < SAME_CHANNEL_WINDOW_SECS
-            } else {
-                true
-            }
-        })
+        .filter(|e| e.source != current_source || e.chat_id != current_chat_id)
         .take(lookback)
         .collect();
-    picks.reverse();
+
+    let mut same_channel: Vec<&Entry> = entries
+        .iter()
+        .rev()
+        .filter(|e| e.source == current_source && e.chat_id == current_chat_id)
+        .take(same_channel_cap)
+        .collect();
+
+    // Merge by ts ascending. Entries are naturally sorted in the log, so
+    // reversing each slice then walking them once is enough.
+    cross_channel.reverse();
+    same_channel.reverse();
+    let mut picks: Vec<&Entry> = Vec::with_capacity(cross_channel.len() + same_channel.len());
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < cross_channel.len() && j < same_channel.len() {
+        if cross_channel[i].ts <= same_channel[j].ts {
+            picks.push(cross_channel[i]); i += 1;
+        } else {
+            picks.push(same_channel[j]); j += 1;
+        }
+    }
+    picks.extend_from_slice(&cross_channel[i..]);
+    picks.extend_from_slice(&same_channel[j..]);
+
+    // Drop SAME_CHANNEL_WINDOW_SECS filter — the explicit `same_channel` slice
+    // above already gives mimi the recent tail she needs. (Kept the const in
+    // scope for future time-gated variants; unused for now.)
+    let _ = SAME_CHANNEL_WINDOW_SECS;
 
     if picks.is_empty() {
         return None;
