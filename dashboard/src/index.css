@@ -1,13 +1,17 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
+
+/* Terminal-first font stack. JetBrains Mono from Google Fonts since we
+ * don't have it vendored locally; Geist kept for the occasional sans label. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap");
 @import "@fontsource-variable/geist";
 
 @custom-variant dark (&:is(.dark *));
 
 @theme inline {
-  --font-heading: var(--font-sans);
-  --font-sans: 'Geist Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-heading: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
   --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
 
   --color-sidebar-ring: var(--sidebar-ring);
@@ -44,220 +48,285 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-danger: var(--danger);
+  --color-accentphosphor: var(--accentphosphor);
 
-  --radius-sm: calc(var(--radius) * 0.6);
-  --radius-md: calc(var(--radius) * 0.8);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) * 1.4);
-  --radius-2xl: calc(var(--radius) * 1.8);
-  --radius-3xl: calc(var(--radius) * 2.2);
-  --radius-4xl: calc(var(--radius) * 2.6);
+  /* Sharp square corners — this is a terminal, not a SaaS dashboard. */
+  --radius: 0px;
+  --radius-sm: 0px;
+  --radius-md: 0px;
+  --radius-lg: 0px;
+  --radius-xl: 0px;
+  --radius-2xl: 0px;
+  --radius-3xl: 0px;
+  --radius-4xl: 0px;
 }
 
-/*
- * Color palette — RGB/RGBA only (no oklch). html2canvas (used by liquidGL
- * to snapshot the page background) doesn't parse oklch yet, so we keep the
- * computed-style space CSS-3 compatible.
- */
 :root {
-  --background: rgb(252 252 253);
-  --foreground: rgb(28 28 32);
+  --background: rgb(250 250 250);
+  --foreground: rgb(20 20 22);
   --card: rgb(255 255 255);
-  --card-foreground: rgb(28 28 32);
+  --card-foreground: rgb(20 20 22);
   --popover: rgb(255 255 255);
-  --popover-foreground: rgb(28 28 32);
-  --primary: rgb(28 28 32);
-  --primary-foreground: rgb(252 252 253);
-  --secondary: rgb(244 244 246);
-  --secondary-foreground: rgb(28 28 32);
-  --muted: rgb(244 244 246);
-  --muted-foreground: rgb(120 120 130);
-  --accent: rgb(244 244 246);
-  --accent-foreground: rgb(28 28 32);
-  --destructive: rgb(220 53 69);
-  --border: rgb(228 228 232);
-  --input: rgb(228 228 232);
-  --ring: rgb(180 180 185);
-  --chart-1: rgb(216 216 218);
-  --chart-2: rgb(170 170 175);
-  --chart-3: rgb(130 130 135);
-  --chart-4: rgb(100 100 105);
-  --chart-5: rgb(70 70 75);
-  --radius: 1.4rem;
-  --sidebar: rgb(252 252 253);
-  --sidebar-foreground: rgb(28 28 32);
-  --sidebar-primary: rgb(28 28 32);
-  --sidebar-primary-foreground: rgb(252 252 253);
-  --sidebar-accent: rgb(244 244 246);
-  --sidebar-accent-foreground: rgb(28 28 32);
-  --sidebar-border: rgb(228 228 232);
-  --sidebar-ring: rgb(180 180 185);
-  --success: rgb(34 197 94);
-  --warning: rgb(234 179 8);
-  --danger: rgb(220 38 38);
+  --popover-foreground: rgb(20 20 22);
+  --primary: rgb(20 20 22);
+  --primary-foreground: rgb(250 250 250);
+  --secondary: rgb(240 240 242);
+  --secondary-foreground: rgb(20 20 22);
+  --muted: rgb(240 240 242);
+  --muted-foreground: rgb(110 110 114);
+  --accent: rgb(240 240 242);
+  --accent-foreground: rgb(20 20 22);
+  --destructive: rgb(200 40 40);
+  --border: rgb(220 220 224);
+  --input: rgb(220 220 224);
+  --ring: rgb(160 160 164);
+  --chart-1: rgb(60 60 60);
+  --chart-2: rgb(100 100 100);
+  --chart-3: rgb(140 140 140);
+  --chart-4: rgb(180 180 180);
+  --chart-5: rgb(220 220 220);
+  --sidebar: rgb(250 250 250);
+  --sidebar-foreground: rgb(20 20 22);
+  --sidebar-primary: rgb(20 20 22);
+  --sidebar-primary-foreground: rgb(250 250 250);
+  --sidebar-accent: rgb(240 240 242);
+  --sidebar-accent-foreground: rgb(20 20 22);
+  --sidebar-border: rgb(220 220 224);
+  --sidebar-ring: rgb(160 160 164);
+  --success: rgb(0 180 80);
+  --warning: rgb(220 150 0);
+  --danger: rgb(200 40 40);
+  --accentphosphor: rgb(0 255 136);
 }
 
 .dark {
-  --background: rgb(10 10 12);
-  --foreground: rgb(245 245 247);
-  --card: rgba(255, 255, 255, 0.08);
-  --card-foreground: rgb(245 245 247);
-  --popover: rgb(28 28 34);
-  --popover-foreground: rgb(245 245 247);
-  --primary: rgb(245 245 247);
-  --primary-foreground: rgb(28 28 32);
-  --secondary: rgba(255, 255, 255, 0.08);
-  --secondary-foreground: rgb(245 245 247);
-  --muted: rgba(255, 255, 255, 0.06);
-  --muted-foreground: rgb(180 180 190);
-  --accent: rgba(255, 255, 255, 0.10);
-  --accent-foreground: rgb(245 245 247);
-  --destructive: rgb(239 68 68);
-  --border: rgba(255, 255, 255, 0.12);
-  --input: rgba(255, 255, 255, 0.14);
-  --ring: rgb(150 150 170);
-  --chart-1: rgb(216 216 218);
-  --chart-2: rgb(170 170 175);
-  --chart-3: rgb(130 130 135);
-  --chart-4: rgb(100 100 105);
-  --chart-5: rgb(70 70 75);
-  --sidebar: rgba(0, 0, 0, 0);
-  --sidebar-foreground: rgb(245 245 247);
-  --sidebar-primary: rgb(180 170 240);
-  --sidebar-primary-foreground: rgb(245 245 247);
-  --sidebar-accent: rgba(255, 255, 255, 0.10);
-  --sidebar-accent-foreground: rgb(245 245 247);
-  --sidebar-border: rgba(255, 255, 255, 0.12);
-  --sidebar-ring: rgb(150 150 170);
-  --success: rgb(74 222 128);
-  --warning: rgb(250 204 21);
-  --danger: rgb(248 113 113);
+  /* Pure terminal: near-black bg, near-white fg, phosphor accent */
+  --background: rgb(8 8 10);
+  --foreground: rgb(220 220 220);
+  --card: rgb(14 14 16);
+  --card-foreground: rgb(220 220 220);
+  --popover: rgb(14 14 16);
+  --popover-foreground: rgb(220 220 220);
+  --primary: rgb(220 220 220);
+  --primary-foreground: rgb(8 8 10);
+  --secondary: rgb(22 22 26);
+  --secondary-foreground: rgb(220 220 220);
+  --muted: rgb(22 22 26);
+  --muted-foreground: rgb(130 130 132);
+  --accent: rgb(22 22 26);
+  --accent-foreground: rgb(220 220 220);
+  --destructive: rgb(255 85 85);
+  --border: rgb(55 55 60);
+  --input: rgb(30 30 34);
+  --ring: rgb(80 80 84);
+  --chart-1: rgb(220 220 220);
+  --chart-2: rgb(170 170 170);
+  --chart-3: rgb(130 130 130);
+  --chart-4: rgb(100 100 100);
+  --chart-5: rgb(70 70 70);
+  --sidebar: rgb(8 8 10);
+  --sidebar-foreground: rgb(220 220 220);
+  --sidebar-primary: rgb(0 255 136);
+  --sidebar-primary-foreground: rgb(8 8 10);
+  --sidebar-accent: rgb(22 22 26);
+  --sidebar-accent-foreground: rgb(220 220 220);
+  --sidebar-border: rgb(55 55 60);
+  --sidebar-ring: rgb(80 80 84);
+  --success: rgb(0 255 136);        /* phosphor green */
+  --warning: rgb(255 192 80);       /* amber */
+  --danger: rgb(255 85 85);
+  --accentphosphor: rgb(0 255 136);
 }
 
 @layer base {
   * {
     border-color: var(--border);
-    outline-color: rgba(150, 150, 170, 0.5);
+    outline-color: rgba(80, 80, 84, 0.5);
   }
   html {
-    @apply font-sans;
-    font-feature-settings: "ss01", "ss02", "cv11";
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-feature-settings: "calt" 1, "liga" 1, "zero" 1, "ss01" 1, "ss02" 1;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+    font-variant-ligatures: contextual;
   }
   body {
-    @apply text-foreground;
-    background-color: #0a0a0c;
-    background-image: url('https://images.unsplash.com/photo-1419242902214-272b3f66ee7a?q=80&w=2400&auto=format&fit=crop');
-    background-size: cover;
-    background-position: center;
-    background-attachment: fixed;
-    background-repeat: no-repeat;
+    background-color: var(--background);
+    color: var(--foreground);
     overflow-x: hidden;
-    isolation: isolate;
-  }
-  /* Dim layer over the photo so text + glass still read clearly. */
-  body::before {
-    content: '';
-    position: fixed;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background-color: rgba(10, 10, 12, 0.55);
+    /* Faint CRT scanlines. Sits on top of content at very low opacity so
+     * it's a texture, not a barrier. Disable if dizzying: comment out. */
+    background-image:
+      repeating-linear-gradient(
+        0deg,
+        transparent 0 2px,
+        rgba(255,255,255,0.015) 2px 3px
+      );
   }
   ::selection {
-    background: rgba(180, 170, 240, 0.45);
-    color: var(--foreground);
+    background: var(--accentphosphor);
+    color: rgb(8 8 10);
   }
 }
 
-/* ---------------------------------------------------------------------------
- * CSS-only fallback glass utilities (used by views that haven't migrated to
- * the WebGL <LiquidGL> component yet). These render fine even when liquidGL
- * isn't initialized.
- * --------------------------------------------------------------------------- */
+/*
+ * Terminal primitives.
+ *
+ * The visual vocabulary:
+ *   • Hard 1px borders using CSS (faster than unicode box-drawing, same vibe)
+ *   • Monospace everywhere
+ *   • Square corners (--radius is 0)
+ *   • Color is either white-on-black or phosphor-green for alive state
+ *   • Labels are UPPERCASE with wide tracking
+ *   • Numbers are tabular
+ */
 @layer components {
-  .glass {
-    position: relative;
-    background:
-      linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0.06));
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    border-radius: var(--radius-xl);
-    border: 1px solid rgba(255,255,255,0.14);
-    box-shadow:
-      0 12px 40px -16px rgba(0,0,0,0.55),
-      0 2px 6px -2px rgba(0,0,0,0.30),
-      inset 0 1px 0 0 rgba(255,255,255,0.30),
-      inset 0 -1px 0 0 rgba(0,0,0,0.16);
+  /* Terminal "card" — a rectangle with a 1px border. */
+  .term-box {
+    background: var(--card);
+    border: 1px solid var(--border);
   }
-  .surface {
-    position: relative;
-    background:
-      linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0.06));
-    backdrop-filter: blur(28px) saturate(180%);
-    -webkit-backdrop-filter: blur(28px) saturate(180%);
-    border-radius: var(--radius-xl);
-    border: 1px solid rgba(255,255,255,0.14);
-    box-shadow:
-      0 12px 40px -16px rgba(0,0,0,0.55),
-      0 2px 6px -2px rgba(0,0,0,0.30),
-      inset 0 1px 0 0 rgba(255,255,255,0.30),
-      inset 0 -1px 0 0 rgba(0,0,0,0.16);
+  .term-box-strong {
+    background: var(--card);
+    border: 1px solid var(--foreground);
+  }
+  /* Use this for glass-era .glass/.surface consumers so nothing breaks. */
+  .glass, .surface {
+    background: var(--card);
+    border: 1px solid var(--border);
   }
   .glass-strong {
-    position: relative;
-    background:
-      linear-gradient(180deg, rgba(255,255,255,0.20), rgba(255,255,255,0.08));
-    backdrop-filter: blur(40px) saturate(200%);
-    -webkit-backdrop-filter: blur(40px) saturate(200%);
-    border-radius: var(--radius-2xl);
-    border: 1px solid rgba(255,255,255,0.18);
-    box-shadow:
-      0 20px 60px -20px rgba(0,0,0,0.65),
-      0 4px 12px -4px rgba(0,0,0,0.40),
-      inset 0 1px 0 0 rgba(255,255,255,0.40),
-      inset 0 -1px 0 0 rgba(0,0,0,0.18);
+    background: var(--card);
+    border: 1px solid var(--foreground);
   }
   .glass-thin {
-    background: rgba(255, 255, 255, 0.07);
-    backdrop-filter: blur(12px) saturate(140%);
-    -webkit-backdrop-filter: blur(12px) saturate(140%);
-    border-radius: var(--radius-lg);
-    border: 1px solid rgba(255, 255, 255, 0.08);
-    box-shadow: inset 0 1px 0 0 rgba(255, 255, 255, 0.10);
+    background: var(--muted);
+    border: 1px solid var(--border);
   }
 
+  /* Section header like: ── OVERVIEW ──────────── */
+  .term-section {
+    @apply text-[11px] uppercase tracking-[0.22em] text-muted-foreground font-medium;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .term-section::before,
+  .term-section::after {
+    content: '';
+    flex: 1;
+    border-top: 1px solid var(--border);
+  }
+  .term-section::before { flex: 0 0 24px; }
+
+  /* Prompt prefix — small > chevron in phosphor accent. */
+  .term-prompt::before {
+    content: '>';
+    color: var(--accentphosphor);
+    margin-right: 8px;
+    font-weight: 600;
+  }
+
+  /* Key/value pair — aligned with dotted leader, terminal-style. */
+  .term-kv {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+  }
+  .term-kv > .k { color: var(--muted-foreground); text-transform: lowercase; }
+  .term-kv > .dots {
+    flex: 1;
+    border-bottom: 1px dotted var(--border);
+    margin-bottom: 2px;
+    min-width: 16px;
+  }
+  .term-kv > .v { color: var(--foreground); font-variant-numeric: tabular-nums; }
+
+  /* Status tag [ OK ]  [FAIL]  [WARN] — fixed width, braces visible. */
+  .term-tag {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 56px;
+    padding: 0 6px;
+    height: 18px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    border: 1px solid currentColor;
+    text-transform: uppercase;
+    color: var(--muted-foreground);
+  }
+  .term-tag.ok   { color: var(--success); }
+  .term-tag.warn { color: var(--warning); }
+  .term-tag.fail { color: var(--danger); }
+
+  /* Solid phosphor button — for primary actions. */
+  .term-btn {
+    @apply inline-flex items-center justify-center gap-1.5 px-3 h-8 text-[12px] font-medium tracking-wide uppercase transition-colors;
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--foreground);
+    border-radius: 0;
+  }
+  .term-btn:hover {
+    border-color: var(--foreground);
+    background: var(--muted);
+  }
+  .term-btn-accent {
+    background: var(--accentphosphor);
+    color: rgb(8 8 10);
+    border: 1px solid var(--accentphosphor);
+  }
+  .term-btn-accent:hover {
+    background: transparent;
+    color: var(--accentphosphor);
+  }
+
+  /* Legacy alias — any view that still says text-[10px] uppercase works. */
   .eyebrow {
-    @apply text-[10px] uppercase tracking-[0.18em] text-muted-foreground font-medium;
+    @apply text-[10px] uppercase tracking-[0.22em] text-muted-foreground font-medium;
   }
   .num {
     font-variant-numeric: tabular-nums;
-    font-feature-settings: "tnum", "ss01";
+    font-feature-settings: "tnum" 1;
   }
   .chip {
-    @apply inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-[11px] text-foreground;
-    background: rgba(255, 255, 255, 0.10);
-    border: 1px solid rgba(255, 255, 255, 0.10);
-    backdrop-filter: blur(12px) saturate(140%);
-    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 0 8px;
+    height: 20px;
+    border: 1px solid var(--border);
+    background: var(--muted);
+    color: var(--muted-foreground);
+    font-size: 11px;
+    letter-spacing: 0.04em;
   }
   .row {
-    @apply flex items-center justify-between rounded-xl px-3 py-2 transition-colors;
+    @apply flex items-center justify-between px-3 py-2 transition-colors;
   }
-  .row:hover { background: rgba(255, 255, 255, 0.06); }
+  .row:hover {
+    background: var(--muted);
+  }
+  .hairline {
+    border-color: var(--border);
+  }
 }
 
+/* Custom scrollbar */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.10);
-  border-radius: 999px;
+  background: rgb(40 40 44);
+  border-radius: 0;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
+  background: rgb(80 80 84);
   background-clip: padding-box;
   border: 2px solid transparent;
 }
