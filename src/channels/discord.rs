@@ -214,16 +214,16 @@ struct Access {
 
 impl Access {
     fn permission_for(&self, user_id: u64) -> Option<Permission> {
-        // strict_guests checked first so an id in both lists resolves to
-        // the more restrictive tier.
+        // Owner is exclusive. Everyone else defaults to Guest unless explicitly
+        // listed in strict_guests (denylist-style hardening for hostile users).
+        // The `guests` field is retained for backwards compat but no longer
+        // gates access — any non-owner Discord user gets Guest tier.
         if user_id == self.owner {
             Some(Permission::Owner)
         } else if self.strict_guests.contains(&user_id) {
             Some(Permission::StrictGuest)
-        } else if self.guests.contains(&user_id) {
-            Some(Permission::Guest)
         } else {
-            None
+            Some(Permission::Guest)
         }
     }
 }
