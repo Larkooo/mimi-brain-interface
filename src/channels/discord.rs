@@ -135,8 +135,8 @@ pub async fn start() -> Result<(), String> {
     let access = load_access();
     eprintln!("discord: session_id={session_id}");
     eprintln!(
-        "discord: owner={} guests={:?} strict_guests={:?} allowed_guilds={:?}",
-        access.owner, access.guests, access.strict_guests, access.allowed_guilds
+        "discord: owner={} guests={:?} strict_guests={:?} allowed_guilds={:?} allowed_dm_user_ids={:?}",
+        access.owner, access.guests, access.strict_guests, access.allowed_guilds, access.allowed_dm_user_ids
     );
     let _ = ACCESS.set(access);
 
@@ -213,6 +213,9 @@ struct Access {
     // Whitelist of guild IDs whose messages the bridge will process. Empty
     // means "all guilds" (legacy behavior). DMs are unaffected by this list.
     allowed_guilds: Vec<u64>,
+    // Whitelist of user IDs allowed to DM the bot. Owner is implicit —
+    // everyone else must be listed here, otherwise DMs are silently dropped.
+    allowed_dm_user_ids: Vec<u64>,
 }
 
 impl Access {
@@ -233,6 +236,10 @@ impl Access {
     fn guild_allowed(&self, guild_id: u64) -> bool {
         self.allowed_guilds.is_empty() || self.allowed_guilds.contains(&guild_id)
     }
+
+    fn dm_allowed(&self, user_id: u64) -> bool {
+        user_id == self.owner || self.allowed_dm_user_ids.contains(&user_id)
+    }
 }
 
 static ACCESS: OnceLock<Access> = OnceLock::new();
@@ -247,6 +254,8 @@ fn load_access() -> Access {
         strict_guests: Vec<u64>,
         #[serde(default)]
         allowed_guilds: Vec<u64>,
+        #[serde(default)]
+        allowed_dm_user_ids: Vec<u64>,
     }
     let path = channel_dir().join("access.json");
     match std::fs::read_to_string(&path) {
@@ -256,6 +265,7 @@ fn load_access() -> Access {
                 guests: raw.guests,
                 strict_guests: raw.strict_guests,
                 allowed_guilds: raw.allowed_guilds,
+                allowed_dm_user_ids: raw.allowed_dm_user_ids,
             },
             Err(e) => {
                 eprintln!("discord: bad access.json ({e}) — using default owner");
@@ -264,6 +274,7 @@ fn load_access() -> Access {
                     guests: Vec::new(),
                     strict_guests: Vec::new(),
                     allowed_guilds: Vec::new(),
+                    allowed_dm_user_ids: Vec::new(),
                 }
             }
         },
@@ -272,6 +283,7 @@ fn load_access() -> Access {
             guests: Vec::new(),
             strict_guests: Vec::new(),
             allowed_guilds: Vec::new(),
+            allowed_dm_user_ids: Vec::new(),
         },
     }
 }
@@ -914,10 +926,18 @@ async fn run_gateway(
         let in_guild = guild_id.is_some();
 
         // Guild whitelist — drop messages from non-whitelisted guilds entirely
-        // (no passive log, no mention response). DMs (no guild_id) bypass.
+        // (no passive log, no mention response).
         if let Some(gid) = guild_id {
             if let Some(acc) = ACCESS.get() {
                 if !acc.guild_allowed(gid) {
+                    continue;
+                }
+            }
+        } else {
+            // DM whitelist — only owner + explicit allowlist may DM.
+            if let Some(acc) = ACCESS.get() {
+                if !acc.dm_allowed(author_id) {
+                    eprintln!("discord: dropped DM from non-whitelisted user {author_id}");
                     continue;
                 }
             }
