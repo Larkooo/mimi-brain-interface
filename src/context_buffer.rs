@@ -12,9 +12,10 @@
 //! non-issue.
 
 use std::collections::HashSet;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::Write;
-use std::sync::{Mutex, OnceLock};
+use std::os::unix::io::AsRawFd;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,46 @@ const FIRST_TURN_LOOKBACK: usize = 40;
 const SAME_CHANNEL_TAIL: usize = 8;
 
 static FILE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Lock guard pairing the in-process Mutex with a cross-process flock on a
+/// sidecar lockfile. The discord and telegram bridges run as separate
+/// systemd services that both read-modify-write recent_context.jsonl; an
+/// in-process Mutex alone doesn't serialize them, so concurrent appends
+/// could interleave and drop messages. Dropping the `File` closes the fd
+/// and releases the flock automatically.
+struct LockGuard {
+    _mutex: MutexGuard<'static, ()>,
+    _file: Option<File>,
+}
+
+fn lock_exclusive() -> LockGuard {
+    let mutex = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    paths::ensure_dirs();
+    let lock_path = paths::recent_context_file().with_extension("lock");
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .ok();
+    if let Some(f) = &file {
+        // Blocks against other *processes* only; we already hold the
+        // in-process Mutex, so same-process callers never contend here.
+        // LOCK_EX can return EINTR on signal — retry once; fall through
+        // on persistent failure (at worst we lose cross-process
+        // serialization for this one op, same as before the fix).
+        for _ in 0..2 {
+            let rc = unsafe { libc::flock(f.as_raw_fd(), libc::LOCK_EX) };
+            if rc == 0 {
+                break;
+            }
+            if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+                break;
+            }
+        }
+    }
+    LockGuard { _mutex: mutex, _file: file }
+}
 
 fn seen_channels() -> &'static Mutex<HashSet<String>> {
     static INSTANCE: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
@@ -101,8 +142,7 @@ pub fn append_reaction(
 }
 
 fn append(entry: Entry) {
-    let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    paths::ensure_dirs();
+    let _lock = lock_exclusive();
     let path = paths::recent_context_file();
 
     let line = match serde_json::to_string(&entry) {
@@ -130,7 +170,7 @@ fn append(entry: Entry) {
 }
 
 pub fn recent() -> Vec<Entry> {
-    let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = lock_exclusive();
     let path = paths::recent_context_file();
     let Ok(content) = fs::read_to_string(&path) else {
         return Vec::new();
@@ -269,7 +309,7 @@ pub fn print_recent(limit: usize) {
 
 /// CLI helper: wipe the buffer.
 pub fn clear() -> std::io::Result<()> {
-    let _guard = FILE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _lock = lock_exclusive();
     let path = paths::recent_context_file();
     if path.exists() {
         OpenOptions::new().write(true).truncate(true).open(&path)?;
