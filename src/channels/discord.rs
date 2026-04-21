@@ -973,8 +973,8 @@ async fn run_gateway(
 
         // Guild messages: only respond if the bot is @mentioned or the
         // message is a reply to one of the bot's messages.
+        let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
         if in_guild {
-            let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
             let mentioned = d.get("mentions").and_then(|x| x.as_array())
                 .map(|arr| arr.iter().any(|m| {
                     m.get("id").and_then(|x| x.as_str())
@@ -991,8 +991,62 @@ async fn run_gateway(
         TYPING_ACTIVE.store(true, Ordering::SeqCst);
         tokio::spawn(typing_loop(client.clone(), token.to_string(), channel_id));
 
+        // If the triggering message is a reply to someone *else's* message,
+        // enrich the turn with that referenced message's content + image
+        // attachments so Mimi can actually see what the user is pointing at.
+        // Skip when the reference is one of Mimi's own messages (she already
+        // has that context in her own output history).
+        let ref_msg = d.get("referenced_message").filter(|v| !v.is_null());
+        let (ref_context, ref_image_attachments): (String, Vec<(String, String)>) = match ref_msg {
+            Some(rm) => {
+                let ref_author_id: u64 = rm.pointer("/author/id").and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                if ref_author_id != 0 && ref_author_id != bot_id {
+                    let ref_author_name = rm.pointer("/author/username").and_then(|x| x.as_str()).unwrap_or("");
+                    let ref_content = rm.get("content").and_then(|x| x.as_str()).unwrap_or("");
+                    let ref_message_id = rm.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                    let ref_atts: Vec<(String, String)> = rm.get("attachments")
+                        .and_then(|x| x.as_array())
+                        .map(|arr| {
+                            arr.iter().filter_map(|a| {
+                                let url = a.get("url").and_then(|x| x.as_str())?.to_string();
+                                let ct = a.get("content_type").and_then(|x| x.as_str()).unwrap_or("");
+                                let media = claude_supported_image_mime(ct)?;
+                                Some((url, media.to_string()))
+                            })
+                            .collect()
+                        })
+                        .unwrap_or_default();
+                    let marker = if ref_atts.is_empty() {
+                        String::new()
+                    } else {
+                        format!(
+                            "\n[{} image attachment{} from referenced message included with this turn]",
+                            ref_atts.len(),
+                            if ref_atts.len() == 1 { "" } else { "s" }
+                        )
+                    };
+                    let ctx = format!(
+                        "<referenced_message user_id=\"{ref_author_id}\" user_name=\"{ref_author_name}\" message_id=\"{ref_message_id}\">\n{ref_content}{marker}\n</referenced_message>\n",
+                    );
+                    (ctx, ref_atts)
+                } else {
+                    (String::new(), Vec::new())
+                }
+            }
+            None => (String::new(), Vec::new()),
+        };
+
+        // Combine triggering-message + referenced-message attachments, capping
+        // the total at MAX_IMAGES_PER_TURN. Triggering msg takes priority.
+        let mut combined_attachments: Vec<(String, String)> = image_attachments.clone();
+        if combined_attachments.len() < MAX_IMAGES_PER_TURN {
+            let remaining = MAX_IMAGES_PER_TURN - combined_attachments.len();
+            combined_attachments.extend(ref_image_attachments.into_iter().take(remaining));
+        }
+
         let mut images: Vec<InlineImage> = Vec::new();
-        for (url, media_type) in &image_attachments {
+        for (url, media_type) in &combined_attachments {
             match fetch_attachment_bytes(client, url).await {
                 Ok(bytes) => {
                     if bytes.len() > MAX_IMAGE_BYTES {
@@ -1035,7 +1089,7 @@ async fn run_gateway(
             )
         };
         let wrapped = format!(
-            "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{content}{image_marker}\n</channel>",
+            "{time_ctx}{guest_memory}{guest_preamble}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{ref_context}{content}{image_marker}\n</channel>",
             perm = permission.as_str()
         );
         // User-msg already logged to context_buffer above (passive-awareness
