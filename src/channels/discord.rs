@@ -135,8 +135,8 @@ pub async fn start() -> Result<(), String> {
     let access = load_access();
     eprintln!("discord: session_id={session_id}");
     eprintln!(
-        "discord: owner={} guests={:?} strict_guests={:?}",
-        access.owner, access.guests, access.strict_guests
+        "discord: owner={} guests={:?} strict_guests={:?} allowed_guilds={:?}",
+        access.owner, access.guests, access.strict_guests, access.allowed_guilds
     );
     let _ = ACCESS.set(access);
 
@@ -210,6 +210,9 @@ struct Access {
     owner: u64,
     guests: Vec<u64>,
     strict_guests: Vec<u64>,
+    // Whitelist of guild IDs whose messages the bridge will process. Empty
+    // means "all guilds" (legacy behavior). DMs are unaffected by this list.
+    allowed_guilds: Vec<u64>,
 }
 
 impl Access {
@@ -226,6 +229,10 @@ impl Access {
             Some(Permission::Guest)
         }
     }
+
+    fn guild_allowed(&self, guild_id: u64) -> bool {
+        self.allowed_guilds.is_empty() || self.allowed_guilds.contains(&guild_id)
+    }
 }
 
 static ACCESS: OnceLock<Access> = OnceLock::new();
@@ -238,6 +245,8 @@ fn load_access() -> Access {
         guests: Vec<u64>,
         #[serde(default)]
         strict_guests: Vec<u64>,
+        #[serde(default)]
+        allowed_guilds: Vec<u64>,
     }
     let path = channel_dir().join("access.json");
     match std::fs::read_to_string(&path) {
@@ -246,6 +255,7 @@ fn load_access() -> Access {
                 owner: raw.owner,
                 guests: raw.guests,
                 strict_guests: raw.strict_guests,
+                allowed_guilds: raw.allowed_guilds,
             },
             Err(e) => {
                 eprintln!("discord: bad access.json ({e}) — using default owner");
@@ -253,6 +263,7 @@ fn load_access() -> Access {
                     owner: DEFAULT_OWNER_ID,
                     guests: Vec::new(),
                     strict_guests: Vec::new(),
+                    allowed_guilds: Vec::new(),
                 }
             }
         },
@@ -260,6 +271,7 @@ fn load_access() -> Access {
             owner: DEFAULT_OWNER_ID,
             guests: Vec::new(),
             strict_guests: Vec::new(),
+            allowed_guilds: Vec::new(),
         },
     }
 }
@@ -900,6 +912,17 @@ async fn run_gateway(
             .and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let in_guild = guild_id.is_some();
+
+        // Guild whitelist — drop messages from non-whitelisted guilds entirely
+        // (no passive log, no mention response). DMs (no guild_id) bypass.
+        if let Some(gid) = guild_id {
+            if let Some(acc) = ACCESS.get() {
+                if !acc.guild_allowed(gid) {
+                    continue;
+                }
+            }
+        }
+
         let channel_id_passive = channel_id.to_string();
 
         // Always log the incoming message to the rolling context buffer —
