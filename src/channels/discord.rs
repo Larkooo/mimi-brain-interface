@@ -121,11 +121,6 @@ static ACTIVE_CHANNEL: AtomicU64 = AtomicU64::new(0);
 // directed at us in guild channels.
 static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
 
-// Set to true while waiting on a claude response; typing loops poll this
-// and exit once the writer starts sending the reply.
-use std::sync::atomic::AtomicBool;
-static TYPING_ACTIVE: AtomicBool = AtomicBool::new(false);
-
 /// Main entrypoint — blocks until killed.
 pub async fn start() -> Result<(), String> {
     let token = load_token()?;
@@ -583,7 +578,6 @@ async fn discord_writer(
                 pending = Some(text);
             }
             Ok(Some(DcOut::Finalize { text })) => {
-                TYPING_ACTIVE.store(false, Ordering::SeqCst);
                 let chan = ACTIVE_CHANNEL.load(Ordering::SeqCst);
                 if chan != 0 {
                     if let Some(msg_id) = active_message_id.take() {
@@ -617,43 +611,12 @@ async fn discord_writer(
                         None => {
                             if let Ok(id) = send_message(&client, &token, chan, &text).await {
                                 active_message_id = Some(id);
-                                TYPING_ACTIVE.store(false, Ordering::SeqCst);
                             }
                         }
                     }
                 }
             }
         }
-    }
-}
-
-async fn send_typing(
-    client: &reqwest::Client,
-    token: &str,
-    channel_id: u64,
-) -> Result<(), String> {
-    let url = format!("https://discord.com/api/v10/channels/{channel_id}/typing");
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bot {token}"))
-        .send()
-        .await
-        .map_err(|e| format!("typing: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!("discord: typing {} {}", status, body);
-    }
-    Ok(())
-}
-
-async fn typing_loop(client: reqwest::Client, token: String, channel_id: u64) {
-    // Discord typing status lasts ~10s; refresh every 8s. Cap at 4 min to
-    // bound runaway tasks if something pins TYPING_ACTIVE=true.
-    for _ in 0..30 {
-        if !TYPING_ACTIVE.load(Ordering::SeqCst) { return; }
-        let _ = send_typing(&client, &token, channel_id).await;
-        tokio::time::sleep(Duration::from_secs(8)).await;
     }
 }
 
@@ -988,8 +951,6 @@ async fn run_gateway(
         }
 
         ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
-        TYPING_ACTIVE.store(true, Ordering::SeqCst);
-        tokio::spawn(typing_loop(client.clone(), token.to_string(), channel_id));
 
         // If the triggering message is a reply to someone *else's* message,
         // enrich the turn with that referenced message's content + image
