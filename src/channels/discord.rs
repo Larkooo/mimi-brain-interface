@@ -117,6 +117,11 @@ const EDIT_THROTTLE_MS: u64 = 1500;
 // where to send. Stored as AtomicU64; 0 = none.
 static ACTIVE_CHANNEL: AtomicU64 = AtomicU64::new(0);
 
+// Latest user message id that triggered the current turn. The writer reads
+// this to attach message_reference (Discord's native "reply" UI) to our
+// outbound msgs so people can see which ping we're answering. 0 = none.
+static TRIGGERING_MESSAGE_ID: AtomicU64 = AtomicU64::new(0);
+
 // Set from the READY event payload. Used to detect @mentions and replies
 // directed at us in guild channels.
 static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
@@ -137,6 +142,7 @@ pub async fn start() -> Result<(), String> {
 
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
     let (to_dc_tx, to_dc_rx) = mpsc::channel::<DcOut>(128);
+    let (typing_tx, typing_rx) = mpsc::channel::<TypingSignal>(16);
 
     let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
@@ -151,12 +157,13 @@ pub async fn start() -> Result<(), String> {
     tokio::spawn(read_claude(stdout, to_dc_tx.clone()));
 
     let client = reqwest::Client::new();
-    tokio::spawn(discord_writer(client.clone(), token.clone(), to_dc_rx));
+    tokio::spawn(discord_writer(client.clone(), token.clone(), to_dc_rx, typing_tx.clone()));
+    tokio::spawn(typing_manager(client.clone(), token.clone(), typing_rx));
     tokio::spawn(send_restart_ping(client.clone(), token.clone()));
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
-        if let Err(e) = run_gateway(&token, &to_claude_tx, &client).await {
+        if let Err(e) = run_gateway(&token, &to_claude_tx, &client, &typing_tx).await {
             eprintln!("discord: gateway error: {e} — reconnecting in 5s");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -336,7 +343,7 @@ async fn send_restart_ping(client: reqwest::Client, token: String) {
     // Gateway handshake + READY usually lands in <2s; give it a beat
     // before hitting the REST API so we don't race.
     tokio::time::sleep(Duration::from_secs(3)).await;
-    if let Err(e) = send_message(&client, &token, chan, &msg).await {
+    if let Err(e) = send_message(&client, &token, chan, &msg, None).await {
         eprintln!("discord: restart ping failed: {e}");
     }
 }
@@ -488,6 +495,62 @@ async fn fetch_attachment_bytes(
     Ok(bytes.to_vec())
 }
 
+// --- Typing indicator ---
+
+// Discord's typing indicator auto-expires after ~10s; we refresh every 8s
+// while a turn is in flight so the user sees "Mimi is typing…" the whole
+// time Claude is thinking. Gateway sends `Start(chan)` when a turn is
+// queued; writer sends `Stop` as soon as the first chunk/msg lands.
+enum TypingSignal {
+    Start(u64),
+    Stop,
+}
+
+async fn typing_manager(
+    client: reqwest::Client,
+    token: String,
+    mut rx: mpsc::Receiver<TypingSignal>,
+) {
+    let mut current: Option<u64> = None;
+    let refresh = Duration::from_secs(8);
+    loop {
+        match current {
+            Some(chan) => {
+                let _ = post_typing(&client, &token, chan).await;
+                match tokio::time::timeout(refresh, rx.recv()).await {
+                    Ok(Some(TypingSignal::Start(c))) => current = Some(c),
+                    Ok(Some(TypingSignal::Stop)) => current = None,
+                    Ok(None) => return,
+                    Err(_) => {} // refresh tick — loop and re-post
+                }
+            }
+            None => match rx.recv().await {
+                Some(TypingSignal::Start(c)) => current = Some(c),
+                Some(TypingSignal::Stop) => {}
+                None => return,
+            },
+        }
+    }
+}
+
+async fn post_typing(
+    client: &reqwest::Client,
+    token: &str,
+    channel_id: u64,
+) -> Result<(), String> {
+    let url = format!("https://discord.com/api/v10/channels/{channel_id}/typing");
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bot {token}"))
+        .send()
+        .await
+        .map_err(|e| format!("post_typing: {e}"))?;
+    if !resp.status().is_success() {
+        eprintln!("discord: post_typing status {}", resp.status());
+    }
+    Ok(())
+}
+
 // --- Claude stdout → Discord pipeline ---
 
 enum DcOut {
@@ -565,6 +628,7 @@ async fn discord_writer(
     client: reqwest::Client,
     token: String,
     mut rx: mpsc::Receiver<DcOut>,
+    typing_tx: mpsc::Sender<TypingSignal>,
 ) {
     let mut active_message_id: Option<u64> = None;
     let mut last_sent_text = String::new();
@@ -583,8 +647,10 @@ async fn discord_writer(
                     if let Some(msg_id) = active_message_id.take() {
                         let _ = edit_message(&client, &token, chan, msg_id, &text).await;
                     } else {
-                        let _ = send_message(&client, &token, chan, &text).await;
+                        let reply_to = current_reply_target();
+                        let _ = send_message(&client, &token, chan, &text, reply_to).await;
                     }
+                    let _ = typing_tx.send(TypingSignal::Stop).await;
                     if !text.trim().is_empty() {
                         crate::context_buffer::append_assistant(
                             "discord",
@@ -609,8 +675,10 @@ async fn discord_writer(
                             let _ = edit_message(&client, &token, chan, msg_id, &text).await;
                         }
                         None => {
-                            if let Ok(id) = send_message(&client, &token, chan, &text).await {
+                            let reply_to = current_reply_target();
+                            if let Ok(id) = send_message(&client, &token, chan, &text, reply_to).await {
                                 active_message_id = Some(id);
+                                let _ = typing_tx.send(TypingSignal::Stop).await;
                             }
                         }
                     }
@@ -618,6 +686,11 @@ async fn discord_writer(
             }
         }
     }
+}
+
+fn current_reply_target() -> Option<u64> {
+    let id = TRIGGERING_MESSAGE_ID.load(Ordering::SeqCst);
+    if id == 0 { None } else { Some(id) }
 }
 
 fn truncate(text: &str) -> String {
@@ -632,12 +705,22 @@ async fn send_message(
     token: &str,
     channel_id: u64,
     text: &str,
+    reply_to: Option<u64>,
 ) -> Result<u64, String> {
     let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages");
+    let mut body = json!({ "content": truncate(text) });
+    if let Some(msg_id) = reply_to {
+        // fail_if_not_exists=false so a deleted trigger falls back to a
+        // plain message rather than erroring the whole send.
+        body["message_reference"] = json!({
+            "message_id": msg_id.to_string(),
+            "fail_if_not_exists": false,
+        });
+    }
     let resp = client
         .post(&url)
         .header("Authorization", format!("Bot {token}"))
-        .json(&json!({ "content": truncate(text) }))
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("send_message: {e}"))?;
@@ -763,6 +846,7 @@ async fn run_gateway(
     token: &str,
     to_claude: &mpsc::Sender<UserTurn>,
     client: &reqwest::Client,
+    typing_tx: &mpsc::Sender<TypingSignal>,
 ) -> Result<(), String> {
     let (ws, _) = connect_async(GATEWAY_URL).await.map_err(|e| format!("connect: {e}"))?;
     let (mut write, mut read) = ws.split();
@@ -951,6 +1035,8 @@ async fn run_gateway(
         }
 
         ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
+        TRIGGERING_MESSAGE_ID.store(message_id, Ordering::SeqCst);
+        let _ = typing_tx.send(TypingSignal::Start(channel_id)).await;
 
         // If the triggering message is a reply to someone *else's* message,
         // enrich the turn with that referenced message's content + image
