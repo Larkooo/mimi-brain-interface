@@ -598,7 +598,16 @@ async fn read_claude(
     typing_tx: mpsc::Sender<TypingSignal>,
 ) {
     let mut reader = BufReader::new(stdout).lines();
+    // All assistant text from the current turn, concatenated with `\n\n`
+    // between distinct text blocks. We coalesce into ONE Discord message per
+    // turn instead of posting each text block separately — multi-block turns
+    // (text → tool → text) used to read as a "double reply" in chat. Cleared
+    // on every turn boundary (`result`) and on detected turn-key change.
     let mut accumulated = String::new();
+    // The turn (triggering_msg_id) the accumulated text belongs to. If the
+    // queue front advances without a `result` (e.g. claude errored mid-turn),
+    // we drop stale text instead of leaking it into the next user's reply.
+    let mut current_turn_key: Option<u64> = None;
     // True while we're inside a run of `text_delta` events within one
     // assistant message — i.e. Claude is actively generating text RIGHT NOW.
     // Gates the typing indicator so it's off during tool use / thinking.
@@ -615,6 +624,10 @@ async fn read_claude(
             "stream_event" => {
                 if let Some(text) = extract_delta_text(&v) {
                     let Some(meta) = peek_meta(&turn_queue) else { continue; };
+                    if current_turn_key != Some(meta.triggering_msg_id) {
+                        accumulated.clear();
+                        current_turn_key = Some(meta.triggering_msg_id);
+                    }
                     if !in_text_burst {
                         in_text_burst = true;
                         let _ = typing_tx.send(TypingSignal::Start(meta.channel_id)).await;
@@ -624,19 +637,20 @@ async fn read_claude(
                 }
             }
             "assistant" => {
-                // Each assistant message with text is a distinct Discord post —
-                // finalize now so the next text block starts a fresh message
-                // (push-notifies the user) instead of silently editing the prior.
+                // Block boundary inside a turn. Stop the typing indicator
+                // (tools / thinking may follow) and append a separator so the
+                // next text block renders cleanly when we post the whole turn
+                // at `result`. We do NOT finalize here anymore — all text
+                // blocks of one turn coalesce into a single Discord message.
                 if in_text_burst {
                     in_text_burst = false;
                     let _ = typing_tx.send(TypingSignal::Stop).await;
                 }
-                if let Some(text) = extract_full_text(&v) {
-                    if !text.trim().is_empty() {
-                        let Some(meta) = peek_meta(&turn_queue) else { continue; };
-                        let _ = tx.send(DcOut::Finalize { text, meta }).await;
-                        accumulated.clear();
-                    }
+                let had_text = extract_full_text(&v)
+                    .map(|t| !t.trim().is_empty())
+                    .unwrap_or(false);
+                if had_text && !accumulated.is_empty() && !accumulated.ends_with("\n\n") {
+                    accumulated.push_str("\n\n");
                 }
             }
             "result" => {
@@ -645,14 +659,14 @@ async fn read_claude(
                     let _ = typing_tx.send(TypingSignal::Stop).await;
                 }
                 let meta = pop_meta(&turn_queue);
-                if !accumulated.is_empty() {
+                let trimmed = accumulated
+                    .trim_end_matches(|c: char| c == '\n' || c == ' ')
+                    .to_string();
+                accumulated.clear();
+                current_turn_key = None;
+                if !trimmed.is_empty() {
                     if let Some(meta) = meta {
-                        let _ = tx.send(DcOut::Finalize {
-                            text: std::mem::take(&mut accumulated),
-                            meta,
-                        }).await;
-                    } else {
-                        accumulated.clear();
+                        let _ = tx.send(DcOut::Finalize { text: trimmed, meta }).await;
                     }
                 }
             }
