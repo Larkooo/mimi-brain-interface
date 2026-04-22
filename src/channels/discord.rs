@@ -1,6 +1,7 @@
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
@@ -113,14 +114,22 @@ const INTENTS: u64 = (1 << 0)   // GUILDS
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 const EDIT_THROTTLE_MS: u64 = 1500;
 
-// Track the active channel ID (DM or guild channel) so the writer knows
-// where to send. Stored as AtomicU64; 0 = none.
-static ACTIVE_CHANNEL: AtomicU64 = AtomicU64::new(0);
+// Per-turn routing: which channel to answer in and which user message to
+// attach as a `message_reference` (Discord's native "reply" UI). Bound to a
+// turn — NOT global — so interleaved turns across channels / users don't
+// cross their reply targets.
+#[derive(Clone, Copy, Debug)]
+struct TurnMeta {
+    channel_id: u64,
+    triggering_msg_id: u64,
+}
 
-// Latest user message id that triggered the current turn. The writer reads
-// this to attach message_reference (Discord's native "reply" UI) to our
-// outbound msgs so people can see which ping we're answering. 0 = none.
-static TRIGGERING_MESSAGE_ID: AtomicU64 = AtomicU64::new(0);
+// FIFO queue of in-flight turns. Gateway pushes on submit; read_claude peeks
+// on every stream event (so outbound chunks carry the right meta) and pops
+// on the turn's `result` event. Because feed_claude writes to Claude's stdin
+// in receive order and Claude emits stdout in input order, the queue stays
+// aligned with what we're currently hearing from Claude.
+type TurnQueue = Arc<Mutex<VecDeque<TurnMeta>>>;
 
 // Set from the READY event payload. Used to detect @mentions and replies
 // directed at us in guild channels.
@@ -143,6 +152,7 @@ pub async fn start() -> Result<(), String> {
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
     let (to_dc_tx, to_dc_rx) = mpsc::channel::<DcOut>(128);
     let (typing_tx, typing_rx) = mpsc::channel::<TypingSignal>(16);
+    let turn_queue: TurnQueue = Arc::new(Mutex::new(VecDeque::new()));
 
     let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
@@ -154,16 +164,16 @@ pub async fn start() -> Result<(), String> {
     });
 
     tokio::spawn(feed_claude(stdin, to_claude_rx));
-    tokio::spawn(read_claude(stdout, to_dc_tx.clone()));
+    tokio::spawn(read_claude(stdout, to_dc_tx.clone(), turn_queue.clone(), typing_tx.clone()));
 
     let client = reqwest::Client::new();
-    tokio::spawn(discord_writer(client.clone(), token.clone(), to_dc_rx, typing_tx.clone()));
+    tokio::spawn(discord_writer(client.clone(), token.clone(), to_dc_rx));
     tokio::spawn(typing_manager(client.clone(), token.clone(), typing_rx));
     tokio::spawn(send_restart_ping(client.clone(), token.clone()));
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
-        if let Err(e) = run_gateway(&token, &to_claude_tx, &client, &typing_tx).await {
+        if let Err(e) = run_gateway(&token, &to_claude_tx, &client, &turn_queue).await {
             eprintln!("discord: gateway error: {e} — reconnecting in 5s");
             tokio::time::sleep(Duration::from_secs(5)).await;
         }
@@ -498,9 +508,14 @@ async fn fetch_attachment_bytes(
 // --- Typing indicator ---
 
 // Discord's typing indicator auto-expires after ~10s; we refresh every 8s
-// while a turn is in flight so the user sees "Mimi is typing…" the whole
-// time Claude is thinking. Gateway sends `Start(chan)` when a turn is
-// queued; writer sends `Stop` as soon as the first chunk/msg lands.
+// while Claude is actively *writing text*. Gating is owned by read_claude:
+// Start fires on the first `text_delta` of a streaming burst, Stop fires
+// on the enclosing `assistant` / `result` event. Tool use and thinking
+// windows emit no text_delta, so typing stays off there.
+//
+// De-dup behavior: repeat `Start(chan)` while already typing on that chan
+// is a no-op (no re-POST). Only state transitions post; the interval tick
+// handles the refresh cadence.
 enum TypingSignal {
     Start(u64),
     Stop,
@@ -512,23 +527,33 @@ async fn typing_manager(
     mut rx: mpsc::Receiver<TypingSignal>,
 ) {
     let mut current: Option<u64> = None;
-    let refresh = Duration::from_secs(8);
+    let mut refresh = tokio::time::interval(Duration::from_secs(8));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Burn the immediate first tick so `interval.tick()` only fires after
+    // ~8s, not at t=0.
+    refresh.tick().await;
+
     loop {
-        match current {
-            Some(chan) => {
-                let _ = post_typing(&client, &token, chan).await;
-                match tokio::time::timeout(refresh, rx.recv()).await {
-                    Ok(Some(TypingSignal::Start(c))) => current = Some(c),
-                    Ok(Some(TypingSignal::Stop)) => current = None,
-                    Ok(None) => return,
-                    Err(_) => {} // refresh tick — loop and re-post
+        tokio::select! {
+            msg = rx.recv() => match msg {
+                Some(TypingSignal::Start(c)) => {
+                    let transition = current != Some(c);
+                    current = Some(c);
+                    if transition {
+                        let _ = post_typing(&client, &token, c).await;
+                        refresh.reset();
+                    }
                 }
-            }
-            None => match rx.recv().await {
-                Some(TypingSignal::Start(c)) => current = Some(c),
-                Some(TypingSignal::Stop) => {}
+                Some(TypingSignal::Stop) => {
+                    current = None;
+                }
                 None => return,
             },
+            _ = refresh.tick() => {
+                if let Some(c) = current {
+                    let _ = post_typing(&client, &token, c).await;
+                }
+            }
         }
     }
 }
@@ -554,13 +579,30 @@ async fn post_typing(
 // --- Claude stdout → Discord pipeline ---
 
 enum DcOut {
-    Chunk { text: String },
-    Finalize { text: String },
+    Chunk { text: String, meta: TurnMeta },
+    Finalize { text: String, meta: TurnMeta },
 }
 
-async fn read_claude(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<DcOut>) {
+fn peek_meta(queue: &TurnQueue) -> Option<TurnMeta> {
+    queue.lock().ok()?.front().copied()
+}
+
+fn pop_meta(queue: &TurnQueue) -> Option<TurnMeta> {
+    queue.lock().ok()?.pop_front()
+}
+
+async fn read_claude(
+    stdout: tokio::process::ChildStdout,
+    tx: mpsc::Sender<DcOut>,
+    turn_queue: TurnQueue,
+    typing_tx: mpsc::Sender<TypingSignal>,
+) {
     let mut reader = BufReader::new(stdout).lines();
     let mut accumulated = String::new();
+    // True while we're inside a run of `text_delta` events within one
+    // assistant message — i.e. Claude is actively generating text RIGHT NOW.
+    // Gates the typing indicator so it's off during tool use / thinking.
+    let mut in_text_burst = false;
 
     while let Ok(Some(line)) = reader.next_line().await {
         let v: Value = match serde_json::from_str(&line) {
@@ -572,24 +614,46 @@ async fn read_claude(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<DcOut
         match ty {
             "stream_event" => {
                 if let Some(text) = extract_delta_text(&v) {
+                    let Some(meta) = peek_meta(&turn_queue) else { continue; };
+                    if !in_text_burst {
+                        in_text_burst = true;
+                        let _ = typing_tx.send(TypingSignal::Start(meta.channel_id)).await;
+                    }
                     accumulated.push_str(&text);
-                    let _ = tx.send(DcOut::Chunk { text: accumulated.clone() }).await;
+                    let _ = tx.send(DcOut::Chunk { text: accumulated.clone(), meta }).await;
                 }
             }
             "assistant" => {
                 // Each assistant message with text is a distinct Discord post —
                 // finalize now so the next text block starts a fresh message
                 // (push-notifies the user) instead of silently editing the prior.
+                if in_text_burst {
+                    in_text_burst = false;
+                    let _ = typing_tx.send(TypingSignal::Stop).await;
+                }
                 if let Some(text) = extract_full_text(&v) {
                     if !text.trim().is_empty() {
-                        let _ = tx.send(DcOut::Finalize { text }).await;
+                        let Some(meta) = peek_meta(&turn_queue) else { continue; };
+                        let _ = tx.send(DcOut::Finalize { text, meta }).await;
                         accumulated.clear();
                     }
                 }
             }
             "result" => {
+                if in_text_burst {
+                    in_text_burst = false;
+                    let _ = typing_tx.send(TypingSignal::Stop).await;
+                }
+                let meta = pop_meta(&turn_queue);
                 if !accumulated.is_empty() {
-                    let _ = tx.send(DcOut::Finalize { text: std::mem::take(&mut accumulated) }).await;
+                    if let Some(meta) = meta {
+                        let _ = tx.send(DcOut::Finalize {
+                            text: std::mem::take(&mut accumulated),
+                            meta,
+                        }).await;
+                    } else {
+                        accumulated.clear();
+                    }
                 }
             }
             _ => {}
@@ -623,41 +687,39 @@ fn extract_full_text(v: &Value) -> Option<String> {
 }
 
 // Discord has no sendMessageDraft equivalent. We stream by editing a single
-// message in place every EDIT_THROTTLE_MS as content grows.
+// message in place every EDIT_THROTTLE_MS as content grows. Each DcOut
+// carries the TurnMeta that spawned it, so interleaved turns (across
+// channels or users) route to their own channel and attach their own
+// `message_reference` — no globals, no cross-turn clobber.
 async fn discord_writer(
     client: reqwest::Client,
     token: String,
     mut rx: mpsc::Receiver<DcOut>,
-    typing_tx: mpsc::Sender<TypingSignal>,
 ) {
     let mut active_message_id: Option<u64> = None;
     let mut last_sent_text = String::new();
-    let mut pending: Option<String> = None;
+    let mut pending: Option<(String, TurnMeta)> = None;
     let throttle = Duration::from_millis(EDIT_THROTTLE_MS);
 
     loop {
         let next = tokio::time::timeout(throttle, rx.recv()).await;
         match next {
-            Ok(Some(DcOut::Chunk { text })) => {
-                pending = Some(text);
+            Ok(Some(DcOut::Chunk { text, meta })) => {
+                pending = Some((text, meta));
             }
-            Ok(Some(DcOut::Finalize { text })) => {
-                let chan = ACTIVE_CHANNEL.load(Ordering::SeqCst);
-                if chan != 0 {
-                    if let Some(msg_id) = active_message_id.take() {
-                        let _ = edit_message(&client, &token, chan, msg_id, &text).await;
-                    } else {
-                        let reply_to = current_reply_target();
-                        let _ = send_message(&client, &token, chan, &text, reply_to).await;
-                    }
-                    let _ = typing_tx.send(TypingSignal::Stop).await;
-                    if !text.trim().is_empty() {
-                        crate::context_buffer::append_assistant(
-                            "discord",
-                            &chan.to_string(),
-                            &text,
-                        );
-                    }
+            Ok(Some(DcOut::Finalize { text, meta })) => {
+                if let Some(msg_id) = active_message_id.take() {
+                    let _ = edit_message(&client, &token, meta.channel_id, msg_id, &text).await;
+                } else {
+                    let reply_to = Some(meta.triggering_msg_id).filter(|&id| id != 0);
+                    let _ = send_message(&client, &token, meta.channel_id, &text, reply_to).await;
+                }
+                if !text.trim().is_empty() {
+                    crate::context_buffer::append_assistant(
+                        "discord",
+                        &meta.channel_id.to_string(),
+                        &text,
+                    );
                 }
                 pending = None;
                 last_sent_text.clear();
@@ -665,20 +727,17 @@ async fn discord_writer(
             Ok(None) => break,
             Err(_) => {
                 // Throttle tick — flush pending draft if changed
-                if let Some(text) = pending.take() {
+                if let Some((text, meta)) = pending.take() {
                     if text == last_sent_text { continue; }
-                    let chan = ACTIVE_CHANNEL.load(Ordering::SeqCst);
-                    if chan == 0 { continue; }
                     last_sent_text = text.clone();
                     match active_message_id {
                         Some(msg_id) => {
-                            let _ = edit_message(&client, &token, chan, msg_id, &text).await;
+                            let _ = edit_message(&client, &token, meta.channel_id, msg_id, &text).await;
                         }
                         None => {
-                            let reply_to = current_reply_target();
-                            if let Ok(id) = send_message(&client, &token, chan, &text, reply_to).await {
+                            let reply_to = Some(meta.triggering_msg_id).filter(|&id| id != 0);
+                            if let Ok(id) = send_message(&client, &token, meta.channel_id, &text, reply_to).await {
                                 active_message_id = Some(id);
-                                let _ = typing_tx.send(TypingSignal::Stop).await;
                             }
                         }
                     }
@@ -686,11 +745,6 @@ async fn discord_writer(
             }
         }
     }
-}
-
-fn current_reply_target() -> Option<u64> {
-    let id = TRIGGERING_MESSAGE_ID.load(Ordering::SeqCst);
-    if id == 0 { None } else { Some(id) }
 }
 
 fn truncate(text: &str) -> String {
@@ -846,7 +900,7 @@ async fn run_gateway(
     token: &str,
     to_claude: &mpsc::Sender<UserTurn>,
     client: &reqwest::Client,
-    typing_tx: &mpsc::Sender<TypingSignal>,
+    turn_queue: &TurnQueue,
 ) -> Result<(), String> {
     let (ws, _) = connect_async(GATEWAY_URL).await.map_err(|e| format!("connect: {e}"))?;
     let (mut write, mut read) = ws.split();
@@ -1034,9 +1088,11 @@ async fn run_gateway(
             if !mentioned && !replied_to_us { continue; }
         }
 
-        ACTIVE_CHANNEL.store(channel_id, Ordering::SeqCst);
-        TRIGGERING_MESSAGE_ID.store(message_id, Ordering::SeqCst);
-        let _ = typing_tx.send(TypingSignal::Start(channel_id)).await;
+        // Meta is pushed to the turn queue right before the UserTurn send so
+        // read_claude sees it in place once Claude's stdout for this turn
+        // starts arriving. Typing is NOT started here — read_claude only
+        // fires `Start` when Claude actually emits text_delta, so thinking
+        // and tool-use windows stay indicator-free.
 
         // If the triggering message is a reply to someone *else's* message,
         // enrich the turn with that referenced message's content + image
@@ -1141,6 +1197,9 @@ async fn run_gateway(
         );
         // User-msg already logged to context_buffer above (passive-awareness
         // path), so no need to log again here.
+        if let Ok(mut q) = turn_queue.lock() {
+            q.push_back(TurnMeta { channel_id, triggering_msg_id: message_id });
+        }
         let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
     }
 
