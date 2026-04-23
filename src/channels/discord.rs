@@ -152,6 +152,7 @@ pub async fn start() -> Result<(), String> {
     let _ = ACCESS.set(access);
 
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
+    let (typing_tx, typing_rx) = mpsc::channel::<TypingCmd>(64);
 
     let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
@@ -162,11 +163,12 @@ pub async fn start() -> Result<(), String> {
         std::process::exit(1);
     });
 
-    tokio::spawn(feed_claude(stdin, to_claude_rx));
-    tokio::spawn(drain_claude(stdout));
+    tokio::spawn(feed_claude(stdin, to_claude_rx, typing_tx.clone()));
+    tokio::spawn(drain_claude(stdout, typing_tx));
 
     let client = reqwest::Client::new();
     tokio::spawn(send_restart_ping(client.clone(), token.clone()));
+    tokio::spawn(typing_loop(client.clone(), token.clone(), typing_rx));
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
@@ -434,6 +436,18 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
 struct UserTurn {
     text: String,
     images: Vec<InlineImage>,
+    chat_id: u64,
+}
+
+// Typing-heartbeat command. The bridge runs a single background task that
+// keeps Discord's "typing…" bubble lit for the channel currently being
+// answered. `feed_claude` fires `Start(chat_id)` when it forwards a turn to
+// the Claude subprocess; `drain_claude` fires `Stop` when the matching
+// `result` event lands. The loop holds a small refcount so back-to-back
+// turns don't drop the bubble before the second `result` arrives.
+enum TypingCmd {
+    Start(u64),
+    Stop,
 }
 
 struct InlineImage {
@@ -457,8 +471,13 @@ fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
     }
 }
 
-async fn feed_claude(mut stdin: ChildStdin, mut rx: mpsc::Receiver<UserTurn>) {
+async fn feed_claude(
+    mut stdin: ChildStdin,
+    mut rx: mpsc::Receiver<UserTurn>,
+    typing_tx: mpsc::Sender<TypingCmd>,
+) {
     while let Some(turn) = rx.recv().await {
+        let _ = typing_tx.send(TypingCmd::Start(turn.chat_id)).await;
         let content_val = if turn.images.is_empty() {
             Value::String(turn.text)
         } else {
@@ -514,7 +533,10 @@ async fn fetch_attachment_bytes(
 // Tool calls (Bash discord post/reply/etc.) are entirely handled by the
 // Claude CLI subprocess — the bridge never sees them directly and doesn't
 // need to.
-async fn drain_claude(stdout: tokio::process::ChildStdout) {
+async fn drain_claude(
+    stdout: tokio::process::ChildStdout,
+    typing_tx: mpsc::Sender<TypingCmd>,
+) {
     let mut reader = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = reader.next_line().await {
         let v: Value = match serde_json::from_str(&line) {
@@ -529,7 +551,89 @@ async fn drain_claude(stdout: tokio::process::ChildStdout) {
             eprintln!(
                 "discord: turn result subtype={subtype} duration_ms={duration} num_turns={num_turns}"
             );
+            let _ = typing_tx.send(TypingCmd::Stop).await;
         }
+    }
+}
+
+// Background task that keeps Discord's "typing…" indicator lit on whichever
+// channel Mimi is currently answering. Discord's POST /typing call lights
+// the bubble for ~10s, so we re-fire every 8s while a turn is in flight.
+//
+// Refcount semantics: each `Start(chan)` bumps `pending`; each `Stop`
+// decrements. Active = the most recent Start's chan, cleared only when
+// `pending` hits 0. This way back-to-back turns from different channels
+// keep the bubble visible on the latest one without a momentary drop.
+//
+// Safety cap: if no Stop arrives within 5 minutes (claude crash, hung
+// turn), we self-clear so we don't spam typing forever.
+async fn typing_loop(
+    client: reqwest::Client,
+    token: String,
+    mut rx: mpsc::Receiver<TypingCmd>,
+) {
+    const TICK: Duration = Duration::from_secs(8);
+    const SAFETY_CAP: Duration = Duration::from_secs(300);
+
+    let mut active: Option<u64> = None;
+    let mut pending: u32 = 0;
+    let mut started_at: Option<std::time::Instant> = None;
+    let mut interval = tokio::time::interval(TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Burn the immediate first tick so we don't double-fire right after a Start.
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            cmd = rx.recv() => {
+                match cmd {
+                    Some(TypingCmd::Start(chan)) => {
+                        pending = pending.saturating_add(1);
+                        let switching = active != Some(chan);
+                        active = Some(chan);
+                        if started_at.is_none() || switching {
+                            started_at = Some(std::time::Instant::now());
+                        }
+                        send_typing_once(&client, &token, chan).await;
+                        interval.reset();
+                    }
+                    Some(TypingCmd::Stop) => {
+                        pending = pending.saturating_sub(1);
+                        if pending == 0 {
+                            active = None;
+                            started_at = None;
+                        }
+                    }
+                    None => return,
+                }
+            }
+            _ = interval.tick() => {
+                if let Some(chan) = active {
+                    if started_at.map(|t| t.elapsed() > SAFETY_CAP).unwrap_or(false) {
+                        eprintln!(
+                            "discord: typing heartbeat hit 5min safety cap chan={chan} pending={pending} — clearing"
+                        );
+                        active = None;
+                        pending = 0;
+                        started_at = None;
+                        continue;
+                    }
+                    send_typing_once(&client, &token, chan).await;
+                }
+            }
+        }
+    }
+}
+
+async fn send_typing_once(client: &reqwest::Client, token: &str, channel_id: u64) {
+    let url = format!("https://discord.com/api/v10/channels/{channel_id}/typing");
+    if let Err(e) = client
+        .post(&url)
+        .header("Authorization", format!("Bot {token}"))
+        .send()
+        .await
+    {
+        eprintln!("discord: typing heartbeat POST failed chan={channel_id}: {e}");
     }
 }
 
@@ -952,7 +1056,7 @@ async fn run_gateway(
             "discord: dispatch chan={} msg={} author={} perm={}",
             channel_id, message_id, author_id, permission.as_str()
         );
-        let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
+        let _ = to_claude.send(UserTurn { text: wrapped, images, chat_id: channel_id }).await;
     }
 
     hb_task.abort();
