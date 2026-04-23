@@ -112,7 +112,6 @@ const INTENTS: u64 = (1 << 0)   // GUILDS
     | (1 << 15);                // MESSAGE_CONTENT (privileged)
 
 const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
-const EDIT_THROTTLE_MS: u64 = 1500;
 
 // Per-turn routing: which channel to answer in and which user message to
 // attach as a `message_reference` (Discord's native "reply" UI). Bound to a
@@ -578,9 +577,9 @@ async fn post_typing(
 
 // --- Claude stdout → Discord pipeline ---
 
-enum DcOut {
-    Chunk { text: String, meta: TurnMeta },
-    Finalize { text: String, meta: TurnMeta },
+struct DcOut {
+    text: String,
+    meta: TurnMeta,
 }
 
 fn peek_meta(queue: &TurnQueue) -> Option<TurnMeta> {
@@ -598,19 +597,20 @@ async fn read_claude(
     typing_tx: mpsc::Sender<TypingSignal>,
 ) {
     let mut reader = BufReader::new(stdout).lines();
-    // All assistant text from the current turn, concatenated with `\n\n`
-    // between distinct text blocks. We coalesce into ONE Discord message per
-    // turn instead of posting each text block separately — multi-block turns
-    // (text → tool → text) used to read as a "double reply" in chat. Cleared
-    // on every turn boundary (`result`) and on detected turn-key change.
-    let mut accumulated = String::new();
-    // The turn (triggering_msg_id) the accumulated text belongs to. If the
-    // queue front advances without a `result` (e.g. claude errored mid-turn),
-    // we drop stale text instead of leaking it into the next user's reply.
-    let mut current_turn_key: Option<u64> = None;
+    // Text accumulated for the in-flight assistant message. Claude may emit
+    // several assistant messages per turn (text → tool_use → text → …); only
+    // the one with stop_reason == "end_turn" is the user-facing reply. Any
+    // text from a tool_use message is internal narration and MUST be dropped
+    // — otherwise "Let me check…" prose leaks into Discord alongside the
+    // actual answer. Committed to `turn_reply` at the end_turn boundary.
+    let mut msg_buffer = String::new();
+    // The reply text for the current turn, set from the `assistant` message
+    // that terminated with stop_reason=end_turn. Flushed to the writer as a
+    // single DcOut on `result`.
+    let mut turn_reply = String::new();
     // True while we're inside a run of `text_delta` events within one
-    // assistant message — i.e. Claude is actively generating text RIGHT NOW.
-    // Gates the typing indicator so it's off during tool use / thinking.
+    // assistant message — gates the typing indicator so it's off during
+    // tool use / thinking.
     let mut in_text_burst = false;
 
     while let Ok(Some(line)) = reader.next_line().await {
@@ -624,33 +624,32 @@ async fn read_claude(
             "stream_event" => {
                 if let Some(text) = extract_delta_text(&v) {
                     let Some(meta) = peek_meta(&turn_queue) else { continue; };
-                    if current_turn_key != Some(meta.triggering_msg_id) {
-                        accumulated.clear();
-                        current_turn_key = Some(meta.triggering_msg_id);
-                    }
                     if !in_text_burst {
                         in_text_burst = true;
                         let _ = typing_tx.send(TypingSignal::Start(meta.channel_id)).await;
                     }
-                    accumulated.push_str(&text);
-                    let _ = tx.send(DcOut::Chunk { text: accumulated.clone(), meta }).await;
+                    msg_buffer.push_str(&text);
                 }
             }
             "assistant" => {
-                // Block boundary inside a turn. Stop the typing indicator
-                // (tools / thinking may follow) and append a separator so the
-                // next text block renders cleanly when we post the whole turn
-                // at `result`. We do NOT finalize here anymore — all text
-                // blocks of one turn coalesce into a single Discord message.
                 if in_text_burst {
                     in_text_burst = false;
                     let _ = typing_tx.send(TypingSignal::Stop).await;
                 }
-                let had_text = extract_full_text(&v)
-                    .map(|t| !t.trim().is_empty())
-                    .unwrap_or(false);
-                if had_text && !accumulated.is_empty() && !accumulated.ends_with("\n\n") {
-                    accumulated.push_str("\n\n");
+                let stop_reason = v
+                    .pointer("/message/stop_reason")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                if stop_reason == "end_turn" {
+                    // Final message of the turn — its text is the user-facing
+                    // reply. Replace turn_reply (don't append) so only the
+                    // last end_turn message wins, in the unusual case of
+                    // multiple.
+                    turn_reply = std::mem::take(&mut msg_buffer);
+                } else {
+                    // tool_use, max_tokens, refusal, etc. — drop any text we
+                    // buffered for this message; it's not the reply.
+                    msg_buffer.clear();
                 }
             }
             "result" => {
@@ -659,14 +658,21 @@ async fn read_claude(
                     let _ = typing_tx.send(TypingSignal::Stop).await;
                 }
                 let meta = pop_meta(&turn_queue);
-                let trimmed = accumulated
+                let queue_len_after = turn_queue.lock().map(|q| q.len()).unwrap_or(999);
+                msg_buffer.clear();
+                let text = std::mem::take(&mut turn_reply);
+                let trimmed = text
                     .trim_end_matches(|c: char| c == '\n' || c == ' ')
                     .to_string();
-                accumulated.clear();
-                current_turn_key = None;
+                eprintln!(
+                    "discord: result pop meta={:?} queue_after={} reply_chars={}",
+                    meta.map(|m| m.triggering_msg_id),
+                    queue_len_after,
+                    trimmed.chars().count()
+                );
                 if !trimmed.is_empty() {
                     if let Some(meta) = meta {
-                        let _ = tx.send(DcOut::Finalize { text: trimmed, meta }).await;
+                        let _ = tx.send(DcOut { text: trimmed, meta }).await;
                     }
                 }
             }
@@ -687,76 +693,28 @@ fn extract_delta_text(v: &Value) -> Option<String> {
     Some(delta.get("text")?.as_str()?.to_string())
 }
 
-fn extract_full_text(v: &Value) -> Option<String> {
-    let content = v.get("message")?.get("content")?.as_array()?;
-    let mut out = String::new();
-    for block in content {
-        if block.get("type").and_then(|x| x.as_str()) == Some("text") {
-            if let Some(s) = block.get("text").and_then(|x| x.as_str()) {
-                out.push_str(s);
-            }
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-// Discord has no sendMessageDraft equivalent. We stream by editing a single
-// message in place every EDIT_THROTTLE_MS as content grows. Each DcOut
-// carries the TurnMeta that spawned it, so interleaved turns (across
-// channels or users) route to their own channel and attach their own
-// `message_reference` — no globals, no cross-turn clobber.
+// Writer is stateless now — one Discord POST per turn. Each DcOut carries
+// the TurnMeta that spawned it, so `message_reference` (Discord's reply UI
+// anchor) is set from the very trigger that caused this turn. Streaming
+// edit-in-place was removed: it was the surface that leaked narration text
+// between tool calls (chunks from intermediate assistant messages were
+// being flushed to Discord before the `end_turn` filter could discard
+// them), and it made cross-turn state (active_message_id) linger past
+// turn boundaries in edge cases. Chat replies are small; no edit loop.
 async fn discord_writer(
     client: reqwest::Client,
     token: String,
     mut rx: mpsc::Receiver<DcOut>,
 ) {
-    let mut active_message_id: Option<u64> = None;
-    let mut last_sent_text = String::new();
-    let mut pending: Option<(String, TurnMeta)> = None;
-    let throttle = Duration::from_millis(EDIT_THROTTLE_MS);
-
-    loop {
-        let next = tokio::time::timeout(throttle, rx.recv()).await;
-        match next {
-            Ok(Some(DcOut::Chunk { text, meta })) => {
-                pending = Some((text, meta));
-            }
-            Ok(Some(DcOut::Finalize { text, meta })) => {
-                if let Some(msg_id) = active_message_id.take() {
-                    let _ = edit_message(&client, &token, meta.channel_id, msg_id, &text).await;
-                } else {
-                    let reply_to = Some(meta.triggering_msg_id).filter(|&id| id != 0);
-                    let _ = send_message(&client, &token, meta.channel_id, &text, reply_to).await;
-                }
-                if !text.trim().is_empty() {
-                    crate::context_buffer::append_assistant(
-                        "discord",
-                        &meta.channel_id.to_string(),
-                        &text,
-                    );
-                }
-                pending = None;
-                last_sent_text.clear();
-            }
-            Ok(None) => break,
-            Err(_) => {
-                // Throttle tick — flush pending draft if changed
-                if let Some((text, meta)) = pending.take() {
-                    if text == last_sent_text { continue; }
-                    last_sent_text = text.clone();
-                    match active_message_id {
-                        Some(msg_id) => {
-                            let _ = edit_message(&client, &token, meta.channel_id, msg_id, &text).await;
-                        }
-                        None => {
-                            let reply_to = Some(meta.triggering_msg_id).filter(|&id| id != 0);
-                            if let Ok(id) = send_message(&client, &token, meta.channel_id, &text, reply_to).await {
-                                active_message_id = Some(id);
-                            }
-                        }
-                    }
-                }
-            }
+    while let Some(DcOut { text, meta }) = rx.recv().await {
+        let reply_to = Some(meta.triggering_msg_id).filter(|&id| id != 0);
+        let _ = send_message(&client, &token, meta.channel_id, &text, reply_to).await;
+        if !text.trim().is_empty() {
+            crate::context_buffer::append_assistant(
+                "discord",
+                &meta.channel_id.to_string(),
+                &text,
+            );
         }
     }
 }
@@ -800,29 +758,6 @@ async fn send_message(
     let v: Value = resp.json().await.map_err(|e| format!("parse: {e}"))?;
     v.get("id").and_then(|x| x.as_str()).and_then(|s| s.parse().ok())
         .ok_or_else(|| "no id in message response".to_string())
-}
-
-async fn edit_message(
-    client: &reqwest::Client,
-    token: &str,
-    channel_id: u64,
-    message_id: u64,
-    text: &str,
-) -> Result<(), String> {
-    let url = format!("https://discord.com/api/v10/channels/{channel_id}/messages/{message_id}");
-    let resp = client
-        .patch(&url)
-        .header("Authorization", format!("Bot {token}"))
-        .json(&json!({ "content": truncate(text) }))
-        .send()
-        .await
-        .map_err(|e| format!("edit_message: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!("discord: edit_message {} {}", status, body);
-    }
-    Ok(())
 }
 
 // --- Gateway loop ---
@@ -1213,6 +1148,10 @@ async fn run_gateway(
         // path), so no need to log again here.
         if let Ok(mut q) = turn_queue.lock() {
             q.push_back(TurnMeta { channel_id, triggering_msg_id: message_id });
+            eprintln!(
+                "discord: push meta chan={} msg={} queue_after={}",
+                channel_id, message_id, q.len()
+            );
         }
         let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
     }
