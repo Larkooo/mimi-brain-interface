@@ -96,11 +96,19 @@ If the guest asks for any of the above, politely refuse and say you only have ch
 // mentions the right person with `<@user_id>`. Message ids appear as
 // `msg=<id>` in `<recent_context>` and on the incoming `<channel>` tag.
 const REPLY_ROUTING_HINT: &str = "<system-reminder>\n\
-Reply-routing controls (Discord only):\n\
-- Default: your reply threads to the triggering message (the one shown on the outer `<channel message_id=...>` tag).\n\
-- To thread to a DIFFERENT message, start your reply with `[reply:<message_id>]` on its own then your text. Ids are the `msg=<id>` values on `<recent_context>` entries and on the `<channel>` tag.\n\
-- To post WITHOUT Discord's reply UI (e.g. when the right move is to just `<@user_id>` the recipient in a plain message), start your reply with `[noreply]`.\n\
-- The prefix is stripped before posting. Use only when the default target is wrong — most turns need no prefix.\n\
+Reply-routing controls (Discord only) — read `<recent_context>` BEFORE choosing:\n\
+\n\
+Three modes, pick ONE per reply:\n\
+1. Default (no prefix) — threads your msg to the triggering msg via Discord's reply UI (the msg shown on the outer `<channel message_id=...>` tag). Only use when that triggering msg is still the most recent thing you're responding to AND the channel hasn't moved on.\n\
+2. `[reply:<msg_id>]` — threads to a DIFFERENT msg id (pulled from a `msg=<id>` value in `<recent_context>`). Use when you're answering a specific older msg that the default would miss.\n\
+3. `[noreply]` — plain post, no reply UI. Open your body with `<@user_id>` to mention the person you're addressing (user ids are on every `<channel>` and `<recent_context>` entry). Strongly preferred when the channel has moved on.\n\
+\n\
+Decision rules:\n\
+- If 3+ msgs from other users landed in `<recent_context>` AFTER your triggering msg, the default threading is stale — switch to `[noreply]` + `<@triggering_author_id>` so the ping lands on the right person without an \"8-min-late\" reply UI pointing at buried context.\n\
+- If you're addressing someone OTHER than the ping author (e.g. the triggering ping was from larko but your reply is actually to sybrrr), use `[noreply]` + `<@their_id>`.\n\
+- If you're just adding an ambient comment (reacting to a running topic, not answering a direct question), use `[noreply]` with NO mention so you don't ping anyone.\n\
+- Wrong reply-UI target (thread pointing at irrelevant msg) is worse than no reply UI. When in doubt, use `[noreply]`.\n\
+- The bridge strips the prefix before posting; it never reaches Discord.\n\
 </system-reminder>\n";
 
 const STRICT_GUEST_SYSTEM_REMINDER: &str = "<system-reminder>\n\
@@ -137,6 +145,7 @@ const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 struct TurnMeta {
     channel_id: u64,
     triggering_msg_id: u64,
+    triggering_author_id: u64,
 }
 
 // FIFO queue of in-flight turns. Gateway pushes on submit; read_claude peeks
@@ -689,8 +698,9 @@ async fn read_claude(
                     .trim_end_matches(|c: char| c == '\n' || c == ' ')
                     .to_string();
                 eprintln!(
-                    "discord: result pop meta={:?} queue_after={} reply_chars={}",
+                    "discord: result pop trigger_msg={:?} trigger_author={:?} queue_after={} reply_chars={}",
                     meta.map(|m| m.triggering_msg_id),
+                    meta.map(|m| m.triggering_author_id),
                     queue_len_after,
                     trimmed.chars().count()
                 );
@@ -733,14 +743,27 @@ async fn discord_writer(
     while let Some(DcOut { text, meta }) = rx.recv().await {
         let routing = parse_reply_directive(&text);
         let body = routing.body;
-        let reply_to = match routing.mode {
+        // Safety net: if Mimi chose the default (thread to trigger) but her
+        // body opens with `<@some_user_id>` and that id isn't the trigger
+        // author, the reply UI would point at the wrong person. Drop threading
+        // in that case so the `<@...>` mention alone carries the addressing.
+        let effective_mode = match routing.mode {
+            ReplyMode::Default if mentions_other_user(body, meta.triggering_author_id) => {
+                ReplyMode::NoReply
+            }
+            other => other,
+        };
+        let reply_to = match effective_mode {
             ReplyMode::NoReply => None,
             ReplyMode::Override(id) => Some(id),
             ReplyMode::Default => Some(meta.triggering_msg_id).filter(|&id| id != 0),
         };
         eprintln!(
-            "discord: writer mode={:?} reply_to={:?} body_chars={}",
+            "discord: writer mode={:?} effective={:?} trigger_msg={} trigger_author={} reply_to={:?} body_chars={}",
             routing.mode,
+            effective_mode,
+            meta.triggering_msg_id,
+            meta.triggering_author_id,
             reply_to,
             body.chars().count()
         );
@@ -792,6 +815,35 @@ fn parse_reply_directive(text: &str) -> ReplyRouting<'_> {
         }
     }
     ReplyRouting { mode: ReplyMode::Default, body: text }
+}
+
+// Scan the leading portion of the reply for a `<@user_id>` mention. Return
+// true iff at least one mention is present AND none of the mentioned ids
+// match the triggering author. Used by the writer to detect the "Mimi is
+// addressing someone other than who pinged her" case, so we can skip the
+// Discord reply-UI (which would point at the wrong person's msg).
+fn mentions_other_user(body: &str, trigger_author: u64) -> bool {
+    // Only scan the first ~80 chars so a mid-body `<@id>` in a long quote
+    // doesn't trigger this heuristic. Addressing mentions land up front.
+    let head: String = body.chars().take(80).collect();
+    let mut found_any = false;
+    let mut found_trigger = false;
+    let mut rest = head.as_str();
+    while let Some(idx) = rest.find("<@") {
+        rest = &rest[idx + 2..];
+        // Skip optional `!` (legacy nickname-mention prefix).
+        let rest_trim = rest.strip_prefix('!').unwrap_or(rest);
+        let end = rest_trim.find('>').unwrap_or(rest_trim.len());
+        let id_str = &rest_trim[..end];
+        if let Ok(id) = id_str.parse::<u64>() {
+            found_any = true;
+            if id == trigger_author && trigger_author != 0 {
+                found_trigger = true;
+            }
+        }
+        rest = &rest_trim[end..];
+    }
+    found_any && !found_trigger
 }
 
 fn truncate(text: &str) -> String {
@@ -1224,10 +1276,14 @@ async fn run_gateway(
         // User-msg already logged to context_buffer above (passive-awareness
         // path), so no need to log again here.
         if let Ok(mut q) = turn_queue.lock() {
-            q.push_back(TurnMeta { channel_id, triggering_msg_id: message_id });
+            q.push_back(TurnMeta {
+                channel_id,
+                triggering_msg_id: message_id,
+                triggering_author_id: author_id,
+            });
             eprintln!(
-                "discord: push meta chan={} msg={} queue_after={}",
-                channel_id, message_id, q.len()
+                "discord: push meta chan={} msg={} author={} queue_after={}",
+                channel_id, message_id, author_id, q.len()
             );
         }
         let _ = to_claude.send(UserTurn { text: wrapped, images }).await;
