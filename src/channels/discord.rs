@@ -599,13 +599,13 @@ async fn read_claude(
     let mut reader = BufReader::new(stdout).lines();
     // Text accumulated for the in-flight assistant message. Claude may emit
     // several assistant messages per turn (text → tool_use → text → …); only
-    // the one with stop_reason == "end_turn" is the user-facing reply. Any
-    // text from a tool_use message is internal narration and MUST be dropped
-    // — otherwise "Let me check…" prose leaks into Discord alongside the
-    // actual answer. Committed to `turn_reply` at the end_turn boundary.
+    // the one that ends with stop_reason == "end_turn" is the user-facing
+    // reply. Text from tool_use / max_tokens / refusal messages is internal
+    // narration ("Let me check…") and MUST be dropped. Committed to
+    // `turn_reply` at the end_turn message_delta boundary.
     let mut msg_buffer = String::new();
-    // The reply text for the current turn, set from the `assistant` message
-    // that terminated with stop_reason=end_turn. Flushed to the writer as a
+    // The reply text for the current turn. Set when the *final* assistant
+    // message's `message_delta` carries stop_reason=end_turn. Flushed as a
     // single DcOut on `result`.
     let mut turn_reply = String::new();
     // True while we're inside a run of `text_delta` events within one
@@ -622,6 +622,8 @@ async fn read_claude(
 
         match ty {
             "stream_event" => {
+                // content_block_delta carries text for the in-flight message;
+                // accumulate into msg_buffer and drive the typing indicator.
                 if let Some(text) = extract_delta_text(&v) {
                     let Some(meta) = peek_meta(&turn_queue) else { continue; };
                     if !in_text_burst {
@@ -630,26 +632,32 @@ async fn read_claude(
                     }
                     msg_buffer.push_str(&text);
                 }
-            }
-            "assistant" => {
-                if in_text_burst {
-                    in_text_burst = false;
-                    let _ = typing_tx.send(TypingSignal::Stop).await;
-                }
-                let stop_reason = v
-                    .pointer("/message/stop_reason")
+                // message_delta carries the stop_reason for the message that
+                // just finished. IMPORTANT: the `assistant` summary event has
+                // stop_reason=null in stream-json; the real signal is here.
+                let event_ty = v
+                    .pointer("/event/type")
                     .and_then(|x| x.as_str())
                     .unwrap_or("");
-                if stop_reason == "end_turn" {
-                    // Final message of the turn — its text is the user-facing
-                    // reply. Replace turn_reply (don't append) so only the
-                    // last end_turn message wins, in the unusual case of
-                    // multiple.
-                    turn_reply = std::mem::take(&mut msg_buffer);
-                } else {
-                    // tool_use, max_tokens, refusal, etc. — drop any text we
-                    // buffered for this message; it's not the reply.
-                    msg_buffer.clear();
+                if event_ty == "message_delta" {
+                    if in_text_burst {
+                        in_text_burst = false;
+                        let _ = typing_tx.send(TypingSignal::Stop).await;
+                    }
+                    let stop_reason = v
+                        .pointer("/event/delta/stop_reason")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    if stop_reason == "end_turn" {
+                        // Final message of the turn — its text is the user-
+                        // facing reply. Replace (don't append) so the last
+                        // end_turn wins if there are somehow several.
+                        turn_reply = std::mem::take(&mut msg_buffer);
+                    } else {
+                        // tool_use, max_tokens, refusal, pause_turn, etc. —
+                        // drop the text we buffered; it's not the reply.
+                        msg_buffer.clear();
+                    }
                 }
             }
             "result" => {
