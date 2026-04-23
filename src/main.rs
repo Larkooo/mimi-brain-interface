@@ -357,9 +357,19 @@ async fn main() {
         Some(Commands::Audit) => commands::audit::run(),
         Some(Commands::Update) => commands::update::run(),
         Some(Commands::Secret { command }) => match command {
-            SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
+            SecretCommands::Set { name, value } => {
+                if let Err(e) = commands::secret::set(&name, &value) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
             SecretCommands::List => commands::secret::list(),
-            SecretCommands::Delete { name } => commands::secret::delete(&name),
+            SecretCommands::Delete { name } => {
+                if let Err(e) = commands::secret::delete(&name) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
             SecretCommands::Run { name, env_var, cmd } => {
                 commands::secret::run(&name, &env_var, &cmd);
             }
