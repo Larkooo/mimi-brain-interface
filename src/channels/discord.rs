@@ -448,6 +448,9 @@ struct UserTurn {
 enum TypingCmd {
     Start(u64),
     Stop,
+    // Drain-side fired this when claude's stdout closes (subprocess crashed or
+    // exited mid-turn) so the bubble doesn't stay lit until the safety cap.
+    ClearAll,
 }
 
 struct InlineImage {
@@ -554,6 +557,11 @@ async fn drain_claude(
             let _ = typing_tx.send(TypingCmd::Stop).await;
         }
     }
+    // Stdout closed — claude subprocess exited. Any in-flight Starts that
+    // never got a matching `result` would otherwise leave pending > 0 and
+    // pin the typing bubble until SAFETY_CAP. Force-clear here.
+    eprintln!("discord: claude stdout closed — clearing typing state");
+    let _ = typing_tx.send(TypingCmd::ClearAll).await;
 }
 
 // Background task that keeps Discord's "typing…" indicator lit on whichever
@@ -565,15 +573,19 @@ async fn drain_claude(
 // `pending` hits 0. This way back-to-back turns from different channels
 // keep the bubble visible on the latest one without a momentary drop.
 //
-// Safety cap: if no Stop arrives within 5 minutes (claude crash, hung
-// turn), we self-clear so we don't spam typing forever.
+// Safety cap: if no Stop arrives within SAFETY_CAP (claude crash, hung
+// turn), we self-clear so we don't spam typing forever. drain_claude
+// also fires ClearAll when claude's stdout closes, which is the primary
+// guard against drift; the cap is just a backstop.
 async fn typing_loop(
     client: reqwest::Client,
     token: String,
     mut rx: mpsc::Receiver<TypingCmd>,
 ) {
     const TICK: Duration = Duration::from_secs(8);
-    const SAFETY_CAP: Duration = Duration::from_secs(300);
+    // Real turns rarely exceed ~30s. 90s is a comfortable upper bound that
+    // doesn't read as "infinite typing" if the refcount somehow drifts.
+    const SAFETY_CAP: Duration = Duration::from_secs(90);
 
     let mut active: Option<u64> = None;
     let mut pending: u32 = 0;
@@ -604,6 +616,11 @@ async fn typing_loop(
                             started_at = None;
                         }
                     }
+                    Some(TypingCmd::ClearAll) => {
+                        pending = 0;
+                        active = None;
+                        started_at = None;
+                    }
                     None => return,
                 }
             }
@@ -611,7 +628,7 @@ async fn typing_loop(
                 if let Some(chan) = active {
                     if started_at.map(|t| t.elapsed() > SAFETY_CAP).unwrap_or(false) {
                         eprintln!(
-                            "discord: typing heartbeat hit 5min safety cap chan={chan} pending={pending} — clearing"
+                            "discord: typing heartbeat hit safety cap chan={chan} pending={pending} — clearing"
                         );
                         active = None;
                         pending = 0;
