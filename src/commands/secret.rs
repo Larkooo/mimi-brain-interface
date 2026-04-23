@@ -28,6 +28,33 @@ fn get_vault_uid() -> Option<u32> {
 
 const MIMI_BIN: &str = "/usr/local/bin/mimi";
 
+/// Validate a secret name before it touches the filesystem.
+///
+/// The name is used directly as the filename under `vault_secrets_dir()`. Without
+/// this check, a name like `../.secret_key` would let the caller overwrite (on set)
+/// or remove (on delete) the master encryption key, making every other stored
+/// secret permanently undecryptable.
+pub(crate) fn validate_secret_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("secret name is empty".into());
+    }
+    if name.len() > 64 {
+        return Err("secret name too long (max 64 chars)".into());
+    }
+    if name.starts_with('.') {
+        return Err("secret name may not start with '.'".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+    {
+        return Err(
+            "secret name may only contain letters, digits, '_', '-', '.'".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Run a mimi secret subcommand as the vault user via sudo
 fn sudo_vault(args: &[&str]) -> std::process::Output {
     let mut cmd_args = vec!["-u", VAULT_USER, "--", MIMI_BIN, "secret"];
@@ -61,7 +88,8 @@ fn ensure_key() -> std::path::PathBuf {
 }
 
 /// Set a secret — delegates to vault user
-pub fn set(name: &str, value: &str) {
+pub fn set(name: &str, value: &str) -> Result<(), String> {
+    validate_secret_name(name)?;
     if is_vault_user() {
         set_direct(name, value);
     } else {
@@ -69,10 +97,15 @@ pub fn set(name: &str, value: &str) {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
+    Ok(())
 }
 
 /// Direct set (runs as vault user)
 fn set_direct(name: &str, value: &str) {
+    if let Err(e) = validate_secret_name(name) {
+        eprintln!("Invalid secret name: {}", e);
+        return;
+    }
     let key_path = ensure_key();
     let dir = vault_secrets_dir();
     fs::create_dir_all(&dir).ok();
@@ -110,6 +143,7 @@ fn set_direct(name: &str, value: &str) {
 
 /// Decrypt a secret (only works as vault user)
 fn decrypt(name: &str) -> Option<String> {
+    validate_secret_name(name).ok()?;
     let key_path = vault_key_path();
     let secret_path = vault_secrets_dir().join(name);
     if !secret_path.exists() {
@@ -162,7 +196,8 @@ pub fn list() {
 }
 
 /// Delete a secret — delegates to vault user
-pub fn delete(name: &str) {
+pub fn delete(name: &str) -> Result<(), String> {
+    validate_secret_name(name)?;
     if is_vault_user() {
         let path = vault_secrets_dir().join(name);
         if path.exists() {
@@ -176,12 +211,17 @@ pub fn delete(name: &str) {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
+    Ok(())
 }
 
 /// Run a command with a decrypted secret injected as env var.
 /// When called as ubuntu: delegates to vault user which decrypts and execs.
 /// The decrypted value NEVER appears in stdout or the calling process.
 pub fn run(name: &str, env_var: &str, cmd_args: &[String]) {
+    if let Err(e) = validate_secret_name(name) {
+        eprintln!("Invalid secret name: {}", e);
+        std::process::exit(1);
+    }
     if is_vault_user() {
         // We're the vault user — decrypt and exec
         let value = match decrypt(name) {
@@ -340,3 +380,49 @@ pub fn setup_vault() {
 
 // Need libc for geteuid
 extern crate libc;
+
+#[cfg(test)]
+mod tests {
+    use super::validate_secret_name;
+
+    #[test]
+    fn accepts_plain_names() {
+        for name in ["telegram", "api_key", "deploy-key", "v2.token", "a"] {
+            assert!(validate_secret_name(name).is_ok(), "should accept {name:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_path_traversal() {
+        for name in [
+            "../.secret_key",
+            ".secret_key",
+            "..",
+            ".",
+            "foo/bar",
+            "foo\\bar",
+            "",
+        ] {
+            assert!(
+                validate_secret_name(name).is_err(),
+                "should reject {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_weird_chars() {
+        for name in ["foo bar", "foo\0", "foo;rm", "foo\n", "name$"] {
+            assert!(
+                validate_secret_name(name).is_err(),
+                "should reject {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_overlong() {
+        let too_long = "a".repeat(65);
+        assert!(validate_secret_name(&too_long).is_err());
+    }
+}
