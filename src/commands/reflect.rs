@@ -1,4 +1,4 @@
-use crate::channels::discord;
+use crate::channels::{discord, telegram};
 use crate::context_buffer;
 use crate::paths;
 use std::process::Command;
@@ -68,8 +68,12 @@ pub fn run() {
     // Drop restart markers so each bridge posts a "fresh after reflect"
     // ping into the most recently active channel on startup. Owner asked
     // to always be told when a restart happens.
-    if let Some(chan) = latest_channel("discord") {
-        let _ = discord::write_restart_marker(chan, Some("fresh context after nightly reflect 🌀"));
+    let marker_msg = "fresh context after nightly reflect 🌀";
+    if let Some(chan) = latest_channel_id("discord").and_then(|s| s.parse::<u64>().ok()) {
+        let _ = discord::write_restart_marker(chan, Some(marker_msg));
+    }
+    if let Some(chat) = latest_channel_id("telegram").and_then(|s| s.parse::<i64>().ok()) {
+        let _ = telegram::write_restart_marker(chat, Some(marker_msg));
     }
 
     println!("Restarting channel bridges for fresh context...");
@@ -89,11 +93,13 @@ pub fn run() {
 }
 
 /// Pick the chat_id of the most recent entry for `source` in the cross-channel
-/// context buffer. Returns `None` if nothing recent or the id can't be parsed.
-fn latest_channel(source: &str) -> Option<u64> {
+/// context buffer. Returns the raw string so callers can parse it into the
+/// numeric width their channel uses (u64 for discord, i64 for telegram —
+/// telegram group ids are negative).
+fn latest_channel_id(source: &str) -> Option<String> {
     context_buffer::recent()
         .into_iter()
         .rev()
         .find(|e| e.source == source)
-        .and_then(|e| e.chat_id.parse().ok())
+        .map(|e| e.chat_id)
 }

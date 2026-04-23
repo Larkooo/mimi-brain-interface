@@ -42,6 +42,7 @@ pub async fn start() -> Result<(), String> {
 
     let client = reqwest::Client::new();
     tokio::spawn(telegram_writer(client.clone(), token.clone(), to_tg_rx));
+    tokio::spawn(send_restart_ping(client.clone(), token.clone()));
 
     telegram_reader(client, token, allowlist, to_claude_tx).await
 }
@@ -80,6 +81,59 @@ fn channel_dir() -> PathBuf {
 
 fn pidfile() -> PathBuf {
     channel_dir().join("pid")
+}
+
+fn restart_marker_path() -> PathBuf {
+    channel_dir().join("restart_pending")
+}
+
+/// Drop a marker so the next `mimi channel start telegram` (or systemd
+/// restart of `mimi-telegram`) posts a "back online" ping to `chat_id`.
+/// Optionally include a custom `msg`; defaults to a short greeting.
+///
+/// Mirrors the discord bridge's restart marker so any code path that
+/// intentionally restarts mimi-telegram (nightly reflect, `mimi update`
+/// after a rebuild, dashboard restarts) can leave a breadcrumb that the
+/// owner sees on the next turn. Unexpected crashes have no marker and
+/// stay silent.
+pub fn write_restart_marker(chat_id: i64, msg: Option<&str>) -> Result<(), String> {
+    let dir = channel_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let payload = match msg {
+        Some(m) => format!("{chat_id}:{m}"),
+        None => format!("{chat_id}"),
+    };
+    std::fs::write(restart_marker_path(), payload)
+        .map_err(|e| format!("write restart marker: {e}"))
+}
+
+/// Read the marker (if any), wait briefly for the bot to come up, then
+/// post a "back online" message to the recorded chat.
+async fn send_restart_ping(client: reqwest::Client, token: String) {
+    let path = restart_marker_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = std::fs::remove_file(&path);
+    let contents = contents.trim();
+    if contents.is_empty() { return; }
+    let (chat_str, msg) = match contents.split_once(':') {
+        Some((c, m)) => (c, m.to_string()),
+        None => (contents, "back online 🌀".to_string()),
+    };
+    let chat_id: i64 = match chat_str.parse() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("telegram: bad restart marker ({contents:?}): {e}");
+            return;
+        }
+    };
+    // Give the bot a beat to come up before hitting Telegram's API.
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    if let Err(e) = send_message(&client, &token, chat_id, &msg).await {
+        eprintln!("telegram: restart ping failed: {e}");
+    }
 }
 
 fn write_pidfile() -> Result<(), String> {
