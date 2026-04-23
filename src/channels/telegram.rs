@@ -286,6 +286,7 @@ async fn telegram_writer(
                             "telegram",
                             &chat_id.to_string(),
                             &text,
+                            None,
                         );
                     }
                 }
@@ -472,7 +473,14 @@ async fn telegram_reader(
                 "{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
                 time_ctx, preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
             );
-            crate::context_buffer::append_user("telegram", &chat_id_str, &user_name, &text);
+            let tg_msg_id_str = msg.message_id.to_string();
+            crate::context_buffer::append_user(
+                "telegram",
+                &chat_id_str,
+                &user_name,
+                &text,
+                Some(&tg_msg_id_str),
+            );
             let turn = UserTurn { text: wrapped };
             if tx.send(turn).await.is_err() {
                 return Err("claude pipe closed".into());

@@ -46,6 +46,13 @@ pub struct Entry {
     pub user_name: String,
     pub kind: Kind,
     pub text: String,
+    // Native message id on the source platform (Discord msg id, Telegram
+    // msg id). Stored as string for portability. Used so mimi can see
+    // `msg=<id>` in recent_context and route her reply to a specific older
+    // message via `[reply:<id>]` prefix. Optional — old entries and
+    // assistant/reaction entries may lack it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,7 +63,13 @@ pub enum Kind {
     Reaction,
 }
 
-pub fn append_user(source: &str, chat_id: &str, user_name: &str, text: &str) {
+pub fn append_user(
+    source: &str,
+    chat_id: &str,
+    user_name: &str,
+    text: &str,
+    message_id: Option<&str>,
+) {
     append(Entry {
         ts: Utc::now(),
         source: source.into(),
@@ -64,10 +77,16 @@ pub fn append_user(source: &str, chat_id: &str, user_name: &str, text: &str) {
         user_name: user_name.into(),
         kind: Kind::User,
         text: text.into(),
+        message_id: message_id.map(str::to_string),
     });
 }
 
-pub fn append_assistant(source: &str, chat_id: &str, text: &str) {
+pub fn append_assistant(
+    source: &str,
+    chat_id: &str,
+    text: &str,
+    message_id: Option<&str>,
+) {
     append(Entry {
         ts: Utc::now(),
         source: source.into(),
@@ -75,6 +94,7 @@ pub fn append_assistant(source: &str, chat_id: &str, text: &str) {
         user_name: String::new(),
         kind: Kind::Assistant,
         text: text.into(),
+        message_id: message_id.map(str::to_string),
     });
 }
 
@@ -97,6 +117,7 @@ pub fn append_reaction(
         user_name: reactor_name.into(),
         kind: Kind::Reaction,
         text,
+        message_id: None,
     });
 }
 
@@ -227,7 +248,11 @@ pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<Strin
             }
         };
         let text = truncate(&e.text, 400);
-        out.push_str(&format!("[{age} · {who}] {text}\n"));
+        let id_tag = match &e.message_id {
+            Some(id) if !id.is_empty() => format!(" msg={id}"),
+            _ => String::new(),
+        };
+        out.push_str(&format!("[{age} · {who}{id_tag}] {text}\n"));
     }
     out.push_str("</recent_context>\n");
     Some(out)
