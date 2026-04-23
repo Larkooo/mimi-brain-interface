@@ -1,7 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use serde::Deserialize;
@@ -13,7 +12,23 @@ use tokio::sync::{mpsc, Mutex};
 use crate::paths;
 
 const POLL_TIMEOUT_SECS: u64 = 30;
-const DRAFT_FLUSH_INTERVAL_MS: u64 = 200;
+
+// Appended to every Telegram turn. Tells Mimi her stdout is not the wire
+// anymore — outbound must go through `telegram` Bash-wrapper tool calls.
+const OUTBOUND_PROTOCOL: &str = "<system-reminder>\n\
+TELEGRAM OUTBOUND PROTOCOL — read before replying.\n\
+\n\
+This bridge is pure tool-call. Your stdout/assistant text is NOT delivered to Telegram. Anything you say without a tool call is invisible to the chat — only the server logs see it. To send a message you MUST call `Bash` with one of the `telegram` CLI wrappers in `~/.mimi/bin/`:\n\
+\n\
+- `telegram reply <chat_id> <triggering_msg_id> \"<text>\"` — quote-reply to the triggering message.\n\
+- `telegram post <chat_id> \"<text>\"` — plain message, no quote thread.\n\
+- `telegram edit <chat_id> <msg_id> \"<text>\"` — edit a message you sent earlier.\n\
+- `telegram react <chat_id> <msg_id> <emoji>` — drop a reaction (unicode emoji; Telegram allows only a fixed set).\n\
+- `telegram delete <chat_id> <msg_id>` — remove one of your messages.\n\
+- `telegram typing <chat_id>` — optional, shows the typing bubble briefly (~5s).\n\
+\n\
+The triggering `<channel>` tag on every inbound message carries `chat_id`, `message_id`, and `user_id` — read those directly. Never output conversational text without a wrapper call; if you intend to say nothing, say nothing and finish the turn.\n\
+</system-reminder>\n";
 
 /// Main entrypoint — blocks until killed.
 pub async fn start() -> Result<(), String> {
@@ -26,7 +41,6 @@ pub async fn start() -> Result<(), String> {
     eprintln!("telegram: allowlist={:?}", allowlist);
 
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
-    let (to_tg_tx, to_tg_rx) = mpsc::channel::<TgOut>(128);
 
     let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
@@ -38,11 +52,9 @@ pub async fn start() -> Result<(), String> {
     });
 
     tokio::spawn(feed_claude(stdin, to_claude_rx));
-    tokio::spawn(read_claude(stdout, to_tg_tx.clone()));
+    tokio::spawn(drain_claude(stdout));
 
     let client = reqwest::Client::new();
-    tokio::spawn(telegram_writer(client.clone(), token.clone(), to_tg_rx));
-
     telegram_reader(client, token, allowlist, to_claude_tx).await
 }
 
@@ -185,190 +197,28 @@ async fn feed_claude(mut stdin: ChildStdin, mut rx: mpsc::Receiver<UserTurn>) {
     }
 }
 
-// --- Claude → Telegram pipeline ---
-
-enum TgOut {
-    DraftChunk { text: String },
-    Finalize { text: String },
-}
-
-static ACTIVE_CHAT: AtomicI64 = AtomicI64::new(0);
-
-async fn read_claude(stdout: tokio::process::ChildStdout, tx: mpsc::Sender<TgOut>) {
+// --- Claude stdout drainer ---
+//
+// The bridge no longer interprets Claude's stdout. Every outbound message
+// goes through `telegram` Bash-wrapper tool calls that Claude makes
+// herself. We still drain stdout so Claude's pipe doesn't fill and block,
+// and we eprintln! a one-line heartbeat on `result` for debugging.
+async fn drain_claude(stdout: tokio::process::ChildStdout) {
     let mut reader = BufReader::new(stdout).lines();
-    let mut accumulated = String::new();
-
     while let Ok(Some(line)) = reader.next_line().await {
         let v: Value = match serde_json::from_str(&line) {
             Ok(v) => v,
             Err(_) => continue,
         };
         let ty = v.get("type").and_then(|x| x.as_str()).unwrap_or("");
-
-        match ty {
-            "stream_event" => {
-                if let Some(text) = extract_delta_text(&v) {
-                    accumulated.push_str(&text);
-                    let _ = tx
-                        .send(TgOut::DraftChunk {
-                            text: accumulated.clone(),
-                        })
-                        .await;
-                }
-            }
-            "assistant" => {
-                if let Some(text) = extract_full_text(&v) {
-                    accumulated = text;
-                }
-            }
-            "result" => {
-                if !accumulated.is_empty() {
-                    let _ = tx
-                        .send(TgOut::Finalize {
-                            text: std::mem::take(&mut accumulated),
-                        })
-                        .await;
-                }
-            }
-            _ => {}
+        if ty == "result" {
+            let duration = v.get("duration_ms").and_then(|x| x.as_u64()).unwrap_or(0);
+            let num_turns = v.get("num_turns").and_then(|x| x.as_u64()).unwrap_or(0);
+            let subtype = v.get("subtype").and_then(|x| x.as_str()).unwrap_or("");
+            eprintln!(
+                "telegram: turn result subtype={subtype} duration_ms={duration} num_turns={num_turns}"
+            );
         }
-    }
-}
-
-fn extract_delta_text(v: &Value) -> Option<String> {
-    let event = v.get("event")?;
-    let t = event.get("type").and_then(|x| x.as_str())?;
-    if t != "content_block_delta" {
-        return None;
-    }
-    let delta = event.get("delta")?;
-    if delta.get("type").and_then(|x| x.as_str())? != "text_delta" {
-        return None;
-    }
-    Some(delta.get("text")?.as_str()?.to_string())
-}
-
-fn extract_full_text(v: &Value) -> Option<String> {
-    let content = v.get("message")?.get("content")?.as_array()?;
-    let mut out = String::new();
-    for block in content {
-        if block.get("type").and_then(|x| x.as_str()) == Some("text") {
-            if let Some(s) = block.get("text").and_then(|x| x.as_str()) {
-                out.push_str(s);
-            }
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-async fn telegram_writer(
-    client: reqwest::Client,
-    token: String,
-    mut rx: mpsc::Receiver<TgOut>,
-) {
-    let mut draft_id: i64 = 1;
-    let mut last_draft_text = String::new();
-    let mut pending: Option<String> = None;
-    let flush = tokio::time::Duration::from_millis(DRAFT_FLUSH_INTERVAL_MS);
-
-    loop {
-        let next = tokio::time::timeout(flush, rx.recv()).await;
-        match next {
-            Ok(Some(TgOut::DraftChunk { text })) => {
-                pending = Some(text);
-            }
-            Ok(Some(TgOut::Finalize { text })) => {
-                let chat_id = ACTIVE_CHAT.load(Ordering::SeqCst);
-                if chat_id != 0 {
-                    let _ = send_message(&client, &token, chat_id, &text).await;
-                    if !text.trim().is_empty() {
-                        crate::context_buffer::append_assistant(
-                            "telegram",
-                            &chat_id.to_string(),
-                            &text,
-                            None,
-                        );
-                    }
-                }
-                pending = None;
-                last_draft_text.clear();
-                draft_id = draft_id.wrapping_add(1).max(1);
-            }
-            Ok(None) => break,
-            Err(_) => {
-                // timeout — flush pending draft
-                if let Some(text) = pending.take() {
-                    if text != last_draft_text {
-                        let chat_id = ACTIVE_CHAT.load(Ordering::SeqCst);
-                        if chat_id != 0 {
-                            let _ = send_draft(&client, &token, chat_id, draft_id, &text).await;
-                            last_draft_text = text;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-async fn send_draft(
-    client: &reqwest::Client,
-    token: &str,
-    chat_id: i64,
-    draft_id: i64,
-    text: &str,
-) -> Result<(), String> {
-    let truncated = truncate_for_telegram(text);
-    let url = format!("https://api.telegram.org/bot{}/sendMessageDraft", token);
-    let body = json!({
-        "chat_id": chat_id,
-        "draft_id": draft_id,
-        "text": truncated,
-    });
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("sendMessageDraft: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!("telegram: sendMessageDraft {} {}", status, body);
-    }
-    Ok(())
-}
-
-async fn send_message(
-    client: &reqwest::Client,
-    token: &str,
-    chat_id: i64,
-    text: &str,
-) -> Result<(), String> {
-    let truncated = truncate_for_telegram(text);
-    let url = format!("https://api.telegram.org/bot{}/sendMessage", token);
-    let body = json!({ "chat_id": chat_id, "text": truncated });
-    let resp = client
-        .post(&url)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("sendMessage: {e}"))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        eprintln!("telegram: sendMessage {} {}", status, body);
-    }
-    Ok(())
-}
-
-fn truncate_for_telegram(text: &str) -> String {
-    // Telegram max is 4096 chars for text messages.
-    let max = 4096;
-    if text.chars().count() <= max {
-        text.to_string()
-    } else {
-        text.chars().take(max).collect()
     }
 }
 
@@ -460,7 +310,6 @@ async fn telegram_reader(
                 eprintln!("telegram: blocked user {from_id}");
                 continue;
             }
-            ACTIVE_CHAT.store(msg.chat.id, Ordering::SeqCst);
             let user_name = msg.from.as_ref()
                 .and_then(|u| u.username.clone().or_else(|| u.first_name.clone()))
                 .unwrap_or_default();
@@ -470,8 +319,8 @@ async fn telegram_reader(
                 .unwrap_or_default();
             let time_ctx = crate::channels::time_context_preamble();
             let wrapped = format!(
-                "{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
-                time_ctx, preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
+                "{}{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
+                time_ctx, OUTBOUND_PROTOCOL, preamble, msg.chat.id, chat_type, from_id, user_name, msg.message_id, text
             );
             let tg_msg_id_str = msg.message_id.to_string();
             crate::context_buffer::append_user(
@@ -480,6 +329,10 @@ async fn telegram_reader(
                 &user_name,
                 &text,
                 Some(&tg_msg_id_str),
+            );
+            eprintln!(
+                "telegram: dispatch chat={} msg={} user={}",
+                msg.chat.id, msg.message_id, from_id
             );
             let turn = UserTurn { text: wrapped };
             if tx.send(turn).await.is_err() {
