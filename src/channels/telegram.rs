@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -41,6 +42,7 @@ pub async fn start() -> Result<(), String> {
     eprintln!("telegram: allowlist={:?}", allowlist);
 
     let (to_claude_tx, to_claude_rx) = mpsc::channel::<UserTurn>(16);
+    let (typing_tx, typing_rx) = mpsc::channel::<TypingCmd>(64);
 
     let mut claude = spawn_claude_with_retry(&session_id).await?;
     let stdin = claude.stdin.take().ok_or("claude stdin not piped")?;
@@ -51,10 +53,11 @@ pub async fn start() -> Result<(), String> {
         std::process::exit(1);
     });
 
-    tokio::spawn(feed_claude(stdin, to_claude_rx));
-    tokio::spawn(drain_claude(stdout));
+    tokio::spawn(feed_claude(stdin, to_claude_rx, typing_tx.clone()));
+    tokio::spawn(drain_claude(stdout, typing_tx));
 
     let client = reqwest::Client::new();
+    tokio::spawn(typing_loop(client.clone(), token.clone(), typing_rx));
     telegram_reader(client, token, allowlist, to_claude_tx).await
 }
 
@@ -177,10 +180,22 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
 
 struct UserTurn {
     text: String,
+    chat_id: i64,
 }
 
-async fn feed_claude(mut stdin: ChildStdin, mut rx: mpsc::Receiver<UserTurn>) {
+// See discord.rs::TypingCmd — same shape, Telegram chat ids are i64.
+enum TypingCmd {
+    Start(i64),
+    Stop,
+}
+
+async fn feed_claude(
+    mut stdin: ChildStdin,
+    mut rx: mpsc::Receiver<UserTurn>,
+    typing_tx: mpsc::Sender<TypingCmd>,
+) {
     while let Some(turn) = rx.recv().await {
+        let _ = typing_tx.send(TypingCmd::Start(turn.chat_id)).await;
         let payload = json!({
             "type": "user",
             "message": { "role": "user", "content": turn.text }
@@ -203,7 +218,10 @@ async fn feed_claude(mut stdin: ChildStdin, mut rx: mpsc::Receiver<UserTurn>) {
 // goes through `telegram` Bash-wrapper tool calls that Claude makes
 // herself. We still drain stdout so Claude's pipe doesn't fill and block,
 // and we eprintln! a one-line heartbeat on `result` for debugging.
-async fn drain_claude(stdout: tokio::process::ChildStdout) {
+async fn drain_claude(
+    stdout: tokio::process::ChildStdout,
+    typing_tx: mpsc::Sender<TypingCmd>,
+) {
     let mut reader = BufReader::new(stdout).lines();
     while let Ok(Some(line)) = reader.next_line().await {
         let v: Value = match serde_json::from_str(&line) {
@@ -218,7 +236,75 @@ async fn drain_claude(stdout: tokio::process::ChildStdout) {
             eprintln!(
                 "telegram: turn result subtype={subtype} duration_ms={duration} num_turns={num_turns}"
             );
+            let _ = typing_tx.send(TypingCmd::Stop).await;
         }
+    }
+}
+
+// See discord.rs::typing_loop. Telegram's sendChatAction lights the bubble
+// for ~5s, so we re-fire every 4s. Same refcount + safety-cap semantics.
+async fn typing_loop(
+    client: reqwest::Client,
+    token: String,
+    mut rx: mpsc::Receiver<TypingCmd>,
+) {
+    const TICK: Duration = Duration::from_secs(4);
+    const SAFETY_CAP: Duration = Duration::from_secs(300);
+
+    let mut active: Option<i64> = None;
+    let mut pending: u32 = 0;
+    let mut started_at: Option<std::time::Instant> = None;
+    let mut interval = tokio::time::interval(TICK);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    interval.tick().await;
+
+    loop {
+        tokio::select! {
+            cmd = rx.recv() => {
+                match cmd {
+                    Some(TypingCmd::Start(chan)) => {
+                        pending = pending.saturating_add(1);
+                        let switching = active != Some(chan);
+                        active = Some(chan);
+                        if started_at.is_none() || switching {
+                            started_at = Some(std::time::Instant::now());
+                        }
+                        send_typing_once(&client, &token, chan).await;
+                        interval.reset();
+                    }
+                    Some(TypingCmd::Stop) => {
+                        pending = pending.saturating_sub(1);
+                        if pending == 0 {
+                            active = None;
+                            started_at = None;
+                        }
+                    }
+                    None => return,
+                }
+            }
+            _ = interval.tick() => {
+                if let Some(chan) = active {
+                    if started_at.map(|t| t.elapsed() > SAFETY_CAP).unwrap_or(false) {
+                        eprintln!(
+                            "telegram: typing heartbeat hit 5min safety cap chan={chan} pending={pending} — clearing"
+                        );
+                        active = None;
+                        pending = 0;
+                        started_at = None;
+                        continue;
+                    }
+                    send_typing_once(&client, &token, chan).await;
+                }
+            }
+        }
+    }
+}
+
+async fn send_typing_once(client: &reqwest::Client, token: &str, chat_id: i64) {
+    let url = format!("https://api.telegram.org/bot{token}/sendChatAction");
+    let body = json!({ "chat_id": chat_id, "action": "typing" });
+    if let Err(e) = client.post(&url).json(&body).send().await {
+        eprintln!("telegram: typing heartbeat POST failed chat={chat_id}: {e}");
     }
 }
 
@@ -334,7 +420,7 @@ async fn telegram_reader(
                 "telegram: dispatch chat={} msg={} user={}",
                 msg.chat.id, msg.message_id, from_id
             );
-            let turn = UserTurn { text: wrapped };
+            let turn = UserTurn { text: wrapped, chat_id: msg.chat.id };
             if tx.send(turn).await.is_err() {
                 return Err("claude pipe closed".into());
             }
