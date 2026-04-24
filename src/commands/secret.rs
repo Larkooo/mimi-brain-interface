@@ -132,6 +132,35 @@ fn decrypt(name: &str) -> Option<String> {
     }
 }
 
+/// Print a decrypted secret to stdout. Intended for shell-wrapper / service
+/// launch patterns where the caller needs the value without running the
+/// child process under the vault user (which then can't read the caller's
+/// home or touch their files). Prefer `run` when possible — `get` leaks
+/// the value into the parent process's memory / stdout pipe.
+pub fn get(name: &str) {
+    if is_vault_user() {
+        match decrypt(name) {
+            Some(v) => {
+                // No trailing newline — callers typically do `FOO=$(mimi
+                // secret get bar)` which strips newlines anyway, but not
+                // adding one lets the value be piped cleanly.
+                print!("{}", v);
+            }
+            None => {
+                eprintln!("Secret '{}' not found or failed to decrypt.", name);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let output = sudo_vault(&["get", name]);
+        if !output.status.success() {
+            eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+            std::process::exit(1);
+        }
+        print!("{}", String::from_utf8_lossy(&output.stdout));
+    }
+}
+
 /// List secret names (never values)
 pub fn list() {
     if is_vault_user() {
