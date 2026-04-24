@@ -18,7 +18,10 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::{Datelike, NaiveTime, TimeZone, Weekday};
+use chrono_tz::Tz;
 use futures_util::{SinkExt, StreamExt};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
@@ -33,6 +36,93 @@ const TOKEN_ENV: &str = "DISCORD_USER_TOKEN";
 // presence connection but matching a real client is less flaggable.
 const CAPABILITIES: u64 = 16381;
 
+// How often to re-check the schedule while the gateway is connected. If the
+// active window just ended, we break out and disconnect. Also the poll
+// cadence while offline (waiting for the next window to open).
+const SCHEDULE_TICK: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Deserialize)]
+struct ScheduleFile {
+    #[serde(default = "default_tz")]
+    timezone: String,
+    /// Lowercase weekday names, 3-letter or full. Defaults to Mon-Fri.
+    #[serde(default = "default_days")]
+    days: Vec<String>,
+    /// List of {"start":"HH:MM","end":"HH:MM"} windows in the given tz.
+    windows: Vec<WindowFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WindowFile {
+    start: String,
+    end: String,
+}
+
+fn default_tz() -> String { "America/Chicago".into() }
+fn default_days() -> Vec<String> {
+    vec!["mon","tue","wed","thu","fri"].into_iter().map(String::from).collect()
+}
+
+struct Schedule {
+    tz: Tz,
+    days: Vec<Weekday>,
+    windows: Vec<(NaiveTime, NaiveTime)>,
+}
+
+impl Schedule {
+    fn load() -> Option<Self> {
+        let path = paths::channels_dir().join("presence").join("schedule.json");
+        let text = std::fs::read_to_string(&path).ok()?;
+        let file: ScheduleFile = serde_json::from_str(&text)
+            .map_err(|e| eprintln!("presence: invalid schedule.json: {e}"))
+            .ok()?;
+        let tz: Tz = file.timezone.parse().ok()?;
+        let days = file.days.iter().filter_map(|d| parse_weekday(d)).collect();
+        let windows = file
+            .windows
+            .iter()
+            .filter_map(|w| {
+                Some((
+                    NaiveTime::parse_from_str(&w.start, "%H:%M").ok()?,
+                    NaiveTime::parse_from_str(&w.end, "%H:%M").ok()?,
+                ))
+            })
+            .collect();
+        Some(Schedule { tz, days, windows })
+    }
+
+    fn should_be_online(&self) -> bool {
+        let now = self.tz.from_utc_datetime(&chrono::Utc::now().naive_utc());
+        if !self.days.contains(&now.weekday()) {
+            return false;
+        }
+        let t = now.time();
+        self.windows.iter().any(|(s, e)| {
+            // Handles normal windows; a window that wraps past midnight (end
+            // <= start) is treated as "t >= start OR t < end" — unusual but
+            // cheap to support.
+            if e > s {
+                t >= *s && t < *e
+            } else {
+                t >= *s || t < *e
+            }
+        })
+    }
+}
+
+fn parse_weekday(s: &str) -> Option<Weekday> {
+    match s.to_lowercase().as_str() {
+        "mon" | "monday" => Some(Weekday::Mon),
+        "tue" | "tuesday" => Some(Weekday::Tue),
+        "wed" | "wednesday" => Some(Weekday::Wed),
+        "thu" | "thursday" => Some(Weekday::Thu),
+        "fri" | "friday" => Some(Weekday::Fri),
+        "sat" | "saturday" => Some(Weekday::Sat),
+        "sun" | "sunday" => Some(Weekday::Sun),
+        _ => None,
+    }
+}
+
 pub async fn start() -> Result<(), String> {
     let token = std::env::var(TOKEN_ENV).map_err(|_| {
         format!(
@@ -45,23 +135,40 @@ pub async fn start() -> Result<(), String> {
 
     write_pidfile()?;
 
-    eprintln!("presence: starting (token len={})", token.len());
+    let schedule = Schedule::load();
+    match &schedule {
+        Some(s) => eprintln!(
+            "presence: starting (token len={}, schedule: tz={} days={:?} windows={:?})",
+            token.len(),
+            s.tz.name(),
+            s.days,
+            s.windows,
+        ),
+        None => eprintln!(
+            "presence: starting (token len={}, no schedule.json — always online)",
+            token.len()
+        ),
+    }
 
-    // Reconnect forever. 4004 (auth failure) is flagged but we still wait
-    // and retry so a vault-token rotation + systemd restart isn't required
-    // on every brief disconnect; a persistent 4004 implies a bad/expired
-    // token and will stay bad until the vault is updated.
+    // Outer supervisor loop. When the schedule says "be online" we run the
+    // gateway; the gateway itself also polls the schedule and bails when the
+    // window closes, so this loop handles both cold-start waiting and
+    // reconnects. 4004 (auth failure) still retries — a persistent 4004
+    // means the vault token is stale and will stay bad until updated.
     loop {
-        match run_gateway(&token).await {
-            Ok(()) => {
-                eprintln!("presence: gateway closed cleanly — reconnecting in 5s");
-            }
+        let should_online = schedule.as_ref().map(|s| s.should_be_online()).unwrap_or(true);
+        if !should_online {
+            // Outside any configured window; poll again soon.
+            tokio::time::sleep(SCHEDULE_TICK).await;
+            continue;
+        }
+        match run_gateway(&token, schedule.as_ref()).await {
+            Ok(()) => eprintln!("presence: gateway closed — re-evaluating schedule"),
             Err(e) => {
-                eprintln!("presence: gateway error: {e} — reconnecting in 10s");
+                eprintln!("presence: gateway error: {e} — reconnecting in 5s");
                 tokio::time::sleep(Duration::from_secs(5)).await;
             }
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }
 
@@ -93,7 +200,7 @@ fn write_pidfile() -> Result<(), String> {
         .map_err(|e| format!("write pid: {e}"))
 }
 
-async fn run_gateway(token: &str) -> Result<(), String> {
+async fn run_gateway(token: &str, schedule: Option<&Schedule>) -> Result<(), String> {
     let (ws, _) = connect_async(GATEWAY_URL)
         .await
         .map_err(|e| format!("connect: {e}"))?;
@@ -175,47 +282,59 @@ async fn run_gateway(token: &str) -> Result<(), String> {
     });
 
     // Main loop — we only care about READY (success) and INVALID_SESSION /
-    // close-with-4004 (auth failure). Everything else is ignored.
-    while let Some(msg) = read.next().await {
-        let msg = msg.map_err(|e| format!("ws read: {e}"))?;
-        let text = match msg {
-            Message::Text(t) => t.to_string(),
-            Message::Close(frame) => {
-                hb_task.abort();
-                let code = frame.as_ref().map(|f| u16::from(f.code));
-                return Err(format!("gateway closed, code={:?}", code));
+    // close-with-4004 (auth failure). Everything else is ignored. A separate
+    // ticker polls the schedule and bails (clean exit) when the configured
+    // window closes, so the outer supervisor can go back to sleep.
+    let mut sched_tick = tokio::time::interval(SCHEDULE_TICK);
+    sched_tick.tick().await; // burn immediate
+    loop {
+        tokio::select! {
+            _ = sched_tick.tick() => {
+                if let Some(s) = schedule {
+                    if !s.should_be_online() {
+                        eprintln!("presence: schedule window ended — disconnecting");
+                        hb_task.abort();
+                        return Ok(());
+                    }
+                }
             }
-            _ => continue,
-        };
-        let v: Value = match serde_json::from_str(&text) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if let Some(s) = v.get("s").and_then(|x| x.as_u64()) {
-            *last_seq.write().await = Some(s);
-        }
-        let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(0);
-        if op == 9 {
-            hb_task.abort();
-            return Err("INVALID_SESSION (op=9) — token likely expired".into());
-        }
-        if op != 0 {
-            continue;
-        }
-        let event = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
-        if event == "READY" {
-            let username = v
-                .pointer("/d/user/username")
-                .and_then(|x| x.as_str())
-                .unwrap_or("?");
-            let user_id = v
-                .pointer("/d/user/id")
-                .and_then(|x| x.as_str())
-                .unwrap_or("?");
-            eprintln!("presence: READY — logged in as {username} ({user_id}), status=online");
+            msg = read.next() => {
+                let msg = match msg {
+                    Some(m) => m.map_err(|e| format!("ws read: {e}"))?,
+                    None => {
+                        hb_task.abort();
+                        return Err("gateway stream ended".into());
+                    }
+                };
+                let text = match msg {
+                    Message::Text(t) => t.to_string(),
+                    Message::Close(frame) => {
+                        hb_task.abort();
+                        let code = frame.as_ref().map(|f| u16::from(f.code));
+                        return Err(format!("gateway closed, code={:?}", code));
+                    }
+                    _ => continue,
+                };
+                let v: Value = match serde_json::from_str(&text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if let Some(s) = v.get("s").and_then(|x| x.as_u64()) {
+                    *last_seq.write().await = Some(s);
+                }
+                let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(0);
+                if op == 9 {
+                    hb_task.abort();
+                    return Err("INVALID_SESSION (op=9) — token likely expired".into());
+                }
+                if op != 0 { continue; }
+                let event = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
+                if event == "READY" {
+                    let username = v.pointer("/d/user/username").and_then(|x| x.as_str()).unwrap_or("?");
+                    let user_id = v.pointer("/d/user/id").and_then(|x| x.as_str()).unwrap_or("?");
+                    eprintln!("presence: READY — logged in as {username} ({user_id}), status=online");
+                }
+            }
         }
     }
-
-    hb_task.abort();
-    Err("gateway stream ended".into())
 }
