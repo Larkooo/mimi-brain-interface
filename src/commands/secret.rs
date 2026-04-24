@@ -210,8 +210,11 @@ pub fn run(name: &str, env_var: &str, cmd_args: &[String]) {
             }
         }
     } else {
-        // Delegate to vault user
+        // Delegate to vault user. Preserve MIMI_HOME across the sudo drop
+        // so long-running services (presence, bridges) keep resolving paths
+        // against the owner's ~/.mimi rather than the vault user's home.
         let mut args = vec![
+            "--preserve-env=MIMI_HOME".to_string(),
             "-u".to_string(), VAULT_USER.to_string(), "--".to_string(),
             MIMI_BIN.to_string(), "secret".to_string(),
             "run".to_string(), name.to_string(), env_var.to_string(),

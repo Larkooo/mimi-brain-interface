@@ -2,6 +2,14 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn home() -> PathBuf {
+    // Explicit override wins — used when the process runs under a different
+    // uid than the owner (e.g. `mimi secret run` drops to `mimi-vault` so
+    // dirs::home_dir() returns the vault user's home, not the owner's).
+    if let Ok(v) = std::env::var("MIMI_HOME") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
     dirs::home_dir().expect("no home directory").join(".mimi")
 }
 
