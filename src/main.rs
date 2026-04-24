@@ -327,6 +327,7 @@ async fn main() {
                 let result = match r#type.as_str() {
                     "telegram" => channels::telegram::start().await,
                     "discord" => channels::discord::start().await,
+                    "presence" => channels::presence::start().await,
                     other => Err(format!("unknown or unsupported channel: {other}")),
                 };
                 if let Err(e) = result {
@@ -338,6 +339,7 @@ async fn main() {
                 let result = match r#type.as_str() {
                     "telegram" => channels::telegram::stop(),
                     "discord" => channels::discord::stop(),
+                    "presence" => channels::presence::stop(),
                     other => Err(format!("unknown or unsupported channel: {other}")),
                 };
                 if let Err(e) = result {

@@ -1,4 +1,5 @@
 pub mod discord;
+pub mod presence;
 pub mod telegram;
 
 use chrono::{Datelike, Utc};
