@@ -259,6 +259,11 @@ enum SecretCommands {
         /// Secret name
         name: String,
     },
+    /// Print a decrypted secret to stdout (no trailing newline). For shell
+    /// wrappers like `FOO=$(mimi secret get bar)`. Prefer `run` when you can.
+    Get {
+        name: String,
+    },
     /// Run a command with a secret injected as an env var
     Run {
         /// Secret name
@@ -362,6 +367,7 @@ async fn main() {
             SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
             SecretCommands::List => commands::secret::list(),
             SecretCommands::Delete { name } => commands::secret::delete(&name),
+            SecretCommands::Get { name } => commands::secret::get(&name),
             SecretCommands::Run { name, env_var, cmd } => {
                 commands::secret::run(&name, &env_var, &cmd);
             }
