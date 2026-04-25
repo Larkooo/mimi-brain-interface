@@ -613,6 +613,7 @@ async fn api_secrets_delete(axum::extract::Path(name): axum::extract::Path<Strin
 const LOG_FILES: &[(&str, &str)] = &[
     ("telegram", "/tmp/mimi-telegram.log"),
     ("discord", "/tmp/mimi-discord.log"),
+    ("presence", "/tmp/mimi-presence.log"),
     ("update", "/tmp/mimi-update.log"),
     ("audit", "/tmp/mimi-audit.log"),
     ("reflect", "/tmp/mimi-reflect.log"),
@@ -651,7 +652,8 @@ async fn api_logs_tail(axum::extract::Path(name): axum::extract::Path<String>)
 
 // --- Services (systemd user) ---
 
-const MANAGED_SERVICES: &[&str] = &["mimi-telegram", "mimi-discord", "mimi-dashboard"];
+const MANAGED_SERVICES: &[&str] =
+    &["mimi-telegram", "mimi-discord", "mimi-presence", "mimi-dashboard"];
 
 #[derive(Serialize)]
 struct ServiceInfo {
