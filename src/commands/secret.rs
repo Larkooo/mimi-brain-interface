@@ -15,6 +15,29 @@ fn vault_secrets_dir() -> std::path::PathBuf {
     vault_home().join("secrets")
 }
 
+/// Reject names that could escape `vault_secrets_dir()` when joined into a
+/// file path. The vault user owns `/var/lib/mimi-vault` and has write access
+/// to /tmp, so an unvalidated name like `../../tmp/foo` would land outside
+/// the secrets dir and quietly defeat the vault's isolation.
+fn validate_name(name: &str) -> Result<(), String> {
+    if name.is_empty() || name.len() > 128 {
+        return Err("invalid secret name: must be 1-128 chars".into());
+    }
+    if name.starts_with('.') {
+        return Err("invalid secret name: cannot start with '.'".into());
+    }
+    if name.contains("..") {
+        return Err("invalid secret name: cannot contain '..'".into());
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-' || c == '.')
+    {
+        return Err("invalid secret name: only A-Z, a-z, 0-9, _, -, . allowed".into());
+    }
+    Ok(())
+}
+
 /// Check if we're running as the vault user
 fn is_vault_user() -> bool {
     std::env::var("USER").map(|u| u == VAULT_USER).unwrap_or(false)
@@ -62,6 +85,10 @@ fn ensure_key() -> std::path::PathBuf {
 
 /// Set a secret — delegates to vault user
 pub fn set(name: &str, value: &str) {
+    if let Err(e) = validate_name(name) {
+        eprintln!("{e}");
+        return;
+    }
     if is_vault_user() {
         set_direct(name, value);
     } else {
@@ -138,6 +165,10 @@ fn decrypt(name: &str) -> Option<String> {
 /// home or touch their files). Prefer `run` when possible — `get` leaks
 /// the value into the parent process's memory / stdout pipe.
 pub fn get(name: &str) {
+    if let Err(e) = validate_name(name) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     if is_vault_user() {
         match decrypt(name) {
             Some(v) => {
@@ -192,6 +223,10 @@ pub fn list() {
 
 /// Delete a secret — delegates to vault user
 pub fn delete(name: &str) {
+    if let Err(e) = validate_name(name) {
+        eprintln!("{e}");
+        return;
+    }
     if is_vault_user() {
         let path = vault_secrets_dir().join(name);
         if path.exists() {
@@ -211,6 +246,10 @@ pub fn delete(name: &str) {
 /// When called as ubuntu: delegates to vault user which decrypts and execs.
 /// The decrypted value NEVER appears in stdout or the calling process.
 pub fn run(name: &str, env_var: &str, cmd_args: &[String]) {
+    if let Err(e) = validate_name(name) {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
     if is_vault_user() {
         // We're the vault user — decrypt and exec
         let value = match decrypt(name) {
