@@ -94,6 +94,14 @@ pub fn add(channel_type: &str) -> Result<(), String> {
             "enabled": true,
             "notes": "Requires macOS with Messages.app configured. Run /imessage:configure in Claude Code."
         }),
+        // presence is not a Claude Code plugin — it's a long-running gateway
+        // bridge that keeps a user account showing as online. Setup is via
+        // the secret vault + a systemd unit, not the channel configure flow.
+        "presence" => serde_json::json!({
+            "type": "presence",
+            "enabled": true,
+            "notes": "1. Store your Discord user token: mimi secret set discord_user_token <token>\n2. (Optional) Edit ~/.mimi/channels/presence/schedule.json to set online windows\n3. Run under systemd (recommended):\n     ExecStart=/usr/local/bin/mimi secret run discord_user_token DISCORD_USER_TOKEN /usr/local/bin/mimi channel start presence\n   or one-shot: mimi secret run discord_user_token DISCORD_USER_TOKEN mimi channel start presence"
+        }),
         _ => serde_json::json!({
             "type": channel_type,
             "enabled": true,
@@ -106,12 +114,10 @@ pub fn add(channel_type: &str) -> Result<(), String> {
     println!("\nChannel added: {}", channel_type);
     println!("Config: {}", path.display());
 
-    if plugin.is_some() {
+    if let Some(notes) = config.get("notes").and_then(|v| v.as_str()) {
         println!("\nNext steps:");
-        if let Some(notes) = config.get("notes").and_then(|v| v.as_str()) {
-            for line in notes.lines() {
-                println!("  {}", line);
-            }
+        for line in notes.lines() {
+            println!("  {}", line);
         }
     }
     Ok(())
