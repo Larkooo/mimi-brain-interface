@@ -290,6 +290,43 @@ mod gateway {
         Hello = 8,
         Resumed = 9,
         ClientDisconnect = 13,
+
+        // DAVE protocol (E2EE). Mandatory once `max_dave_protocol_version: 1`
+        // is advertised in IDENTIFY. JSON ops 21-24, 31; binary ops 25-30.
+        // Spec: https://daveprotocol.com / https://github.com/discord/dave-protocol
+        DavePrepareTransition = 21,
+        DaveExecuteTransition = 22,
+        DaveReadyForTransition = 23,
+        DavePrepareEpoch = 24,
+        DaveMlsExternalSenderPackage = 25,
+        DaveMlsKeyPackage = 26,
+        DaveMlsProposals = 27,
+        DaveMlsCommitWelcome = 28,
+        DaveMlsAnnounceCommitTransition = 29,
+        DaveMlsWelcome = 30,
+        DaveMlsInvalidCommitWelcome = 31,
+    }
+
+    /// Build a binary voice-gateway frame: `[seq:u16 BE][op:u8][payload..]`.
+    /// Used for DAVE MLS opcodes 25-30 which are sent as Message::Binary.
+    pub fn build_binary_frame(seq: u16, op: u8, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(3 + payload.len());
+        buf.extend_from_slice(&seq.to_be_bytes());
+        buf.push(op);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Parse the header off an inbound binary voice-gateway frame.
+    /// Returns (seq, op, payload). Errors if the frame is shorter than 3 bytes.
+    pub fn parse_binary_frame(b: &[u8]) -> Option<(u16, u8, &[u8])> {
+        if b.len() < 3 {
+            return None;
+        }
+        let seq = u16::from_be_bytes([b[0], b[1]]);
+        let op = b[2];
+        let payload = &b[3..];
+        Some((seq, op, payload))
     }
 
     /// Wire envelope for every voice gateway message. Discord uses `op` +
@@ -563,6 +600,24 @@ mod gateway {
                                 // If nobody's listening (session dropped
                                 // its receiver), bail.
                                 if in_tx.send(frame).is_err() { break; }
+                            }
+                        }
+                        Some(Ok(Message::Binary(b))) => {
+                            // DAVE MLS opcodes 25-30 arrive as binary frames
+                            // with the layout `[seq:u16 BE][op:u8][payload..]`.
+                            // Until the DAVE handshake state machine is wired,
+                            // log them so we can see what Discord pushes when
+                            // the bot advertises max_dave_protocol_version=1.
+                            if let Some((seq, op, payload)) = parse_binary_frame(&b) {
+                                eprintln!(
+                                    "voice/gateway: binary frame seq={seq} op={op} payload_len={}",
+                                    payload.len()
+                                );
+                            } else {
+                                eprintln!(
+                                    "voice/gateway: short binary frame ({} bytes), ignoring",
+                                    b.len()
+                                );
                             }
                         }
                         _ => {}
