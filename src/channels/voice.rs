@@ -402,6 +402,80 @@ mod rtp {
     //! UDP RTP send/receive. 20ms opus frames, sequence + timestamp
     //! bookkeeping, xsalsa20poly1305 encryption with the secret_key from
     //! the gateway. Inbound: per-SSRC demux into separate audio streams.
+    //!
+    //! Status this commit: UDP socket bind + IP discovery (the 74-byte
+    //! handshake Discord uses to tell the bot what its public-facing
+    //! ip:port is). Encrypted RTP send/receive lands once xsalsa20poly1305
+    //! is added to Cargo.toml.
+
+    use tokio::net::UdpSocket;
+
+    /// Result of the IP-discovery handshake: the address Discord can route
+    /// our RTP back to. Feeds straight into SELECT_PROTOCOL on the gateway.
+    pub struct Discovered {
+        pub address: String,
+        pub port: u16,
+        pub socket: UdpSocket,
+    }
+
+    /// Bind a UDP socket and run Discord's voice IP-discovery dance.
+    ///
+    /// Protocol (per Discord docs): send a 74-byte packet — `[0x00 0x01,
+    /// 0x00 0x46, ssrc:u32, address[64], port:u16]` — to the voice server,
+    /// receive the same shape back with `address`/`port` populated with
+    /// our externally-visible mapping.
+    pub async fn ip_discovery(
+        target_ip: &str,
+        target_port: u16,
+        ssrc: u32,
+    ) -> std::io::Result<Discovered> {
+        let socket = UdpSocket::bind("0.0.0.0:0").await?;
+        socket.connect((target_ip, target_port)).await?;
+
+        // Build the 74-byte discovery packet.
+        let mut pkt = [0u8; 74];
+        pkt[0..2].copy_from_slice(&0x0001u16.to_be_bytes()); // type = request
+        pkt[2..4].copy_from_slice(&0x0046u16.to_be_bytes()); // length = 70
+        pkt[4..8].copy_from_slice(&ssrc.to_be_bytes());
+        // bytes 8..72 = address (zeroed on request)
+        // bytes 72..74 = port (zeroed on request)
+        socket.send(&pkt).await?;
+
+        // Read the response (same 74-byte shape, with address/port filled).
+        let mut resp = [0u8; 74];
+        let n = socket.recv(&mut resp).await?;
+        if n != 74 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("ip-discovery response wrong length: {n}"),
+            ));
+        }
+        // Address is null-terminated ASCII in bytes 8..72.
+        let addr_end = resp[8..72].iter().position(|&b| b == 0).unwrap_or(64);
+        let address = std::str::from_utf8(&resp[8..8 + addr_end])
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?
+            .to_string();
+        let port = u16::from_be_bytes([resp[72], resp[73]]);
+
+        Ok(Discovered { address, port, socket })
+    }
+
+    /// RTP packet header constants. Discord uses RTP version 2 with payload
+    /// type 0x78 (opus). Sequence number + timestamp are bumped per frame.
+    pub const RTP_VERSION_BYTE: u8 = 0x80; // V=2, P=0, X=0, CC=0
+    pub const RTP_PAYLOAD_TYPE: u8 = 0x78;
+
+    /// Build the 12-byte RTP header preamble that goes in front of each
+    /// encrypted opus payload. Caller updates seq/timestamp/ssrc.
+    pub fn rtp_header(seq: u16, timestamp: u32, ssrc: u32) -> [u8; 12] {
+        let mut h = [0u8; 12];
+        h[0] = RTP_VERSION_BYTE;
+        h[1] = RTP_PAYLOAD_TYPE;
+        h[2..4].copy_from_slice(&seq.to_be_bytes());
+        h[4..8].copy_from_slice(&timestamp.to_be_bytes());
+        h[8..12].copy_from_slice(&ssrc.to_be_bytes());
+        h
+    }
 }
 
 mod codec {
