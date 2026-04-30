@@ -276,6 +276,11 @@ pub struct SpawnBody {
     pub model: Option<String>,
     #[serde(default)]
     pub cwd: Option<String>,
+    /// Optional Discord parent channel id; when set, a dedicated report
+    /// thread is created up front and its id is baked into the agent's
+    /// system prompt + stored in meta.json as `report_channel_id`.
+    #[serde(default)]
+    pub report_thread_parent: Option<String>,
 }
 
 pub async fn api_spawn(Json(body): Json<SpawnBody>) -> Result<Json<Value>, (StatusCode, String)> {
@@ -285,7 +290,13 @@ pub async fn api_spawn(Json(body): Json<SpawnBody>) -> Result<Json<Value>, (Stat
     if body.prompt.trim().is_empty() {
         return Err((StatusCode::BAD_REQUEST, "prompt required".into()));
     }
-    let id = subagents::spawn(&body.name, &body.prompt, body.model.as_deref(), body.cwd.as_deref())
+    let id = subagents::spawn(
+        &body.name,
+        &body.prompt,
+        body.model.as_deref(),
+        body.cwd.as_deref(),
+        body.report_thread_parent.as_deref(),
+    )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "id": id })))
 }
