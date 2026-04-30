@@ -230,6 +230,172 @@ mod gateway {
             .unwrap_or(0);
         serde_json::json!(now)
     }
+
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::sync::mpsc;
+    use tokio::time::interval;
+    use tokio_tungstenite::{connect_async, tungstenite::Message};
+
+    /// Output of a successful gateway handshake — what the RTP layer needs
+    /// to start encrypting / sending audio. The voice WS task continues
+    /// running in the background after this returns; cancelling the
+    /// returned `cancel` channel hangs up cleanly.
+    pub struct Handshake {
+        pub ssrc: u32,
+        pub udp_endpoint: (String, u16),
+        pub secret_key: [u8; 32],
+        pub cancel: mpsc::Sender<()>,
+    }
+
+    /// Connect to the voice gateway URL handed out by the main gateway's
+    /// VOICE_SERVER_UPDATE event, run the v8 handshake, then spawn a
+    /// background task that handles heartbeats and demuxes inbound frames.
+    ///
+    /// `endpoint` is the bare host (no scheme, no path) — Discord gives
+    /// it as e.g. `dfw.discord.media:443`. We always upgrade to wss with
+    /// `?v=8`.
+    ///
+    /// Stops short of SELECT_PROTOCOL — that step needs the RTP layer to
+    /// have done UDP IP-discovery first, so it lives in `session.rs`.
+    /// This function returns once we've received READY and started
+    /// heartbeating, with the UDP endpoint + SSRC needed for discovery.
+    pub async fn connect(
+        endpoint: &str,
+        guild_id: u64,
+        user_id: u64,
+        session_id: &str,
+        token: &str,
+    ) -> std::io::Result<(Handshake, ReadyState)> {
+        let url = format!("wss://{}/?v=8", endpoint);
+        let (ws, _resp) = connect_async(&url).await.map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
+        })?;
+        let (mut sink, mut stream) = ws.split();
+
+        // 1. Receive HELLO. Anything else here is a protocol violation.
+        let hello: Hello = match stream.next().await {
+            Some(Ok(Message::Text(txt))) => {
+                let frame: Frame = serde_json::from_str(&txt).map_err(io_err)?;
+                if frame.op != Op::Hello as u8 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("expected HELLO, got op {}", frame.op),
+                    ));
+                }
+                serde_json::from_value(frame.d).map_err(io_err)?
+            }
+            other => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionAborted,
+                    format!("voice ws closed before HELLO: {other:?}"),
+                ));
+            }
+        };
+
+        // 2. Send IDENTIFY.
+        let identify = Frame {
+            op: Op::Identify as u8,
+            d: serde_json::to_value(Identify {
+                server_id: guild_id.to_string(),
+                user_id: user_id.to_string(),
+                session_id: session_id.to_string(),
+                token: token.to_string(),
+            })
+            .map_err(io_err)?,
+            seq: None,
+        };
+        sink.send(Message::Text(
+            serde_json::to_string(&identify).map_err(io_err)?.into(),
+        ))
+        .await
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+
+        // 3. Receive READY (Discord may interleave a HEARTBEAT_ACK or
+        //    HELLO-echo, so we loop until we see op 2).
+        let ready: Ready = loop {
+            match stream.next().await {
+                Some(Ok(Message::Text(txt))) => {
+                    let frame: Frame = serde_json::from_str(&txt).map_err(io_err)?;
+                    if frame.op == Op::Ready as u8 {
+                        break serde_json::from_value(frame.d).map_err(io_err)?;
+                    }
+                    // Unhandled pre-READY frame — log and continue.
+                }
+                Some(Ok(_)) => continue,
+                Some(Err(e)) => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        e.to_string(),
+                    ));
+                }
+                None => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        "voice ws closed before READY",
+                    ));
+                }
+            }
+        };
+
+        // 4. Spawn heartbeat + demux background task. Owns the WS sink/
+        //    stream for the rest of the connection lifetime; cancellable
+        //    via the returned mpsc.
+        let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
+        let interval_ms = hello.heartbeat_interval as u64;
+        tokio::spawn(async move {
+            let mut beat = interval(Duration::from_millis(interval_ms.max(1)));
+            beat.tick().await; // first tick fires immediately; skip.
+            loop {
+                tokio::select! {
+                    _ = cancel_rx.recv() => break,
+                    _ = beat.tick() => {
+                        let f = Frame {
+                            op: Op::Heartbeat as u8,
+                            d: heartbeat_payload(),
+                            seq: None,
+                        };
+                        if let Ok(s) = serde_json::to_string(&f) {
+                            if sink.send(Message::Text(s.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    inbound = stream.next() => match inbound {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Ok(Message::Text(_))) => {
+                            // SESSION_DESCRIPTION / SPEAKING / etc. land here.
+                            // The session.rs orchestration layer will swap in
+                            // a real demuxer (mpsc out) in a follow-up commit;
+                            // for now we just keep the connection warm.
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        });
+
+        let handshake = Handshake {
+            ssrc: ready.ssrc,
+            udp_endpoint: (ready.ip.clone(), ready.port),
+            // Filled in by SELECT_PROTOCOL step in session.rs; placeholder
+            // so the type is well-formed before that step runs.
+            secret_key: [0u8; 32],
+            cancel: cancel_tx,
+        };
+        Ok((handshake, ReadyState { modes: ready.modes }))
+    }
+
+    /// Subset of `Ready` that the session layer needs to pick an
+    /// encryption mode for SELECT_PROTOCOL.
+    pub struct ReadyState {
+        pub modes: Vec<String>,
+    }
+
+    fn io_err<E: std::fmt::Display>(e: E) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    }
 }
 
 mod rtp {
