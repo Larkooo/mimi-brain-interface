@@ -843,6 +843,140 @@ mod tts {
 mod stt {
     //! STT provider abstraction. Initial impl: OpenAI Whisper REST
     //! (per-utterance), called by the VAD when a speech segment ends.
+    //!
+    //! Same API key resolution as `tts` (env var first, then
+    //! `~/.mimi/accounts/openai.json`).
+
+    use serde::Deserialize;
+
+    const OPENAI_STT_URL: &str = "https://api.openai.com/v1/audio/transcriptions";
+
+    #[derive(Deserialize)]
+    struct WhisperResponse {
+        text: String,
+    }
+
+    #[derive(Deserialize)]
+    struct OpenAiKeyFile {
+        api_key: String,
+    }
+
+    fn load_api_key() -> std::io::Result<String> {
+        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
+            if !k.is_empty() { return Ok(k); }
+        }
+        let path = dirs::home_dir()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?
+            .join(".mimi/accounts/openai.json");
+        let body = std::fs::read_to_string(&path).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "OPENAI_API_KEY env var unset and {} not readable: {e}",
+                    path.display()
+                ),
+            )
+        })?;
+        let parsed: OpenAiKeyFile = serde_json::from_str(&body).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, format!("openai.json parse: {e}"))
+        })?;
+        Ok(parsed.api_key)
+    }
+
+    /// Encode a slice of f32 mono PCM as a WAV file body in memory.
+    /// Whisper accepts WAV/MP3/etc; WAV is cheapest to produce here and
+    /// avoids pulling an MP3 encoder.
+    fn pcm_f32_to_wav(samples: &[f32], sample_rate_hz: u32) -> Vec<u8> {
+        let bits_per_sample: u16 = 16;
+        let num_channels: u16 = 1;
+        let byte_rate = sample_rate_hz * num_channels as u32 * bits_per_sample as u32 / 8;
+        let block_align = num_channels * bits_per_sample / 8;
+        let data_size = (samples.len() * 2) as u32;
+        let chunk_size = 36 + data_size;
+
+        let mut buf = Vec::with_capacity(44 + samples.len() * 2);
+        buf.extend_from_slice(b"RIFF");
+        buf.extend_from_slice(&chunk_size.to_le_bytes());
+        buf.extend_from_slice(b"WAVE");
+        buf.extend_from_slice(b"fmt ");
+        buf.extend_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        buf.extend_from_slice(&1u16.to_le_bytes());  // PCM
+        buf.extend_from_slice(&num_channels.to_le_bytes());
+        buf.extend_from_slice(&sample_rate_hz.to_le_bytes());
+        buf.extend_from_slice(&byte_rate.to_le_bytes());
+        buf.extend_from_slice(&block_align.to_le_bytes());
+        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
+        buf.extend_from_slice(b"data");
+        buf.extend_from_slice(&data_size.to_le_bytes());
+        for &s in samples {
+            let clamped = s.clamp(-1.0, 1.0);
+            let i = (clamped * 32767.0) as i16;
+            buf.extend_from_slice(&i.to_le_bytes());
+        }
+        buf
+    }
+
+    /// Transcribe a single utterance (already chunked by the VAD) via
+    /// Whisper. `samples` is mono f32 PCM at `sample_rate_hz` (typically
+    /// 48kHz for inbound Discord audio after opus decode + downmix).
+    pub async fn transcribe(samples: &[f32], sample_rate_hz: u32) -> std::io::Result<String> {
+        if samples.is_empty() {
+            return Ok(String::new());
+        }
+        let key = load_api_key()?;
+        let wav = pcm_f32_to_wav(samples, sample_rate_hz);
+
+        let part = reqwest::multipart::Part::bytes(wav)
+            .file_name("utt.wav")
+            .mime_str("audio/wav")
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("mime: {e}")))?;
+        let form = reqwest::multipart::Form::new()
+            .text("model", "whisper-1")
+            .text("response_format", "json")
+            .part("file", part);
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(OPENAI_STT_URL)
+            .bearer_auth(&key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("stt http: {e}")))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("openai stt http {status}: {body}"),
+            ));
+        }
+        let parsed: WhisperResponse = resp
+            .json()
+            .await
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("stt json: {e}")))?;
+        Ok(parsed.text)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn wav_header_shape() {
+            let samples = vec![0.0f32; 4800]; // 100ms @ 48kHz
+            let wav = pcm_f32_to_wav(&samples, 48_000);
+            assert_eq!(&wav[0..4], b"RIFF");
+            assert_eq!(&wav[8..12], b"WAVE");
+            assert_eq!(&wav[12..16], b"fmt ");
+            // data chunk should equal samples * 2 bytes
+            let data_size_le = &wav[40..44];
+            let data_size = u32::from_le_bytes([
+                data_size_le[0], data_size_le[1], data_size_le[2], data_size_le[3]
+            ]);
+            assert_eq!(data_size as usize, samples.len() * 2);
+        }
+    }
 }
 
 mod vad {
