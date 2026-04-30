@@ -425,12 +425,12 @@ mod gateway {
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
-        // v=4 is the pre-DAVE legacy voice gateway. v=8 introduced DAVE
-        // (E2EE) negotiation and Discord may close with 4017
-        // "E2EE/DAVE protocol required" if our IDENTIFY doesn't drive
-        // that handshake. We only need plain audio so v=4 is the right
-        // floor — sequence numbers (v7) and DAVE (v8) aren't needed.
-        let url = format!("wss://{}/?v=8", endpoint);
+        // v=4 is the pre-DAVE legacy voice gateway. Tested 2026-04-30:
+        // v=8 with max_dave_protocol_version=0 in IDENTIFY still gets
+        // a 4017 "E2EE/DAVE protocol required" close — Discord enforces
+        // DAVE at the URL-version level, not the IDENTIFY-flag level.
+        // We only need plain audio, so v=4 is the right floor.
+        let url = format!("wss://{}/?v=4", endpoint);
         eprintln!("voice/gateway: connecting url={url} guild={guild_id} user={user_id} session={session_id} token_len={}", token.len());
         let (ws, _resp) = connect_async(&url).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
