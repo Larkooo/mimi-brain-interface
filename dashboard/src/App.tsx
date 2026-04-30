@@ -14,8 +14,9 @@ import { LogsView } from './components/logviewer/LogsView'
 import { ServicesView } from './components/services/ServicesView'
 import { NutritionView } from './components/nutrition/NutritionView'
 import { TasksView } from './components/tasks/TasksView'
+import { SubagentsView } from './components/subagents/SubagentsView'
 
-const TITLES: Record<Exclude<View, 'home' | 'brain' | 'logs' | 'services' | 'nutrition' | 'memory' | 'tasks'>, { title: string; subtitle: string }> = {
+const TITLES: Record<Exclude<View, 'home' | 'brain' | 'logs' | 'services' | 'nutrition' | 'memory' | 'tasks' | 'subagents'>, { title: string; subtitle: string }> = {
   channels: { title: 'channels',  subtitle: 'inbound bridges mimi answers on.' },
   crons:    { title: 'schedules', subtitle: 'recurring prompts the scheduler fires on mimi.' },
   secrets:  { title: 'secrets',   subtitle: 'encrypted keystore — values never enter context.' },
@@ -54,6 +55,7 @@ function App() {
         {view === 'nutrition' && <NutritionView />}
         {view === 'memory' && <MemoryView />}
         {view === 'tasks' && <TasksView />}
+        {view === 'subagents' && <SubagentsView />}
         {(view === 'channels' || view === 'crons' || view === 'secrets' || view === 'settings') && (
           <PageShell {...TITLES[view]}>
             {view === 'channels' && <ChannelsView channels={status?.channels ?? []} onRefresh={refresh} />}

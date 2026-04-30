@@ -11,6 +11,7 @@ use crate::paths;
 use std::fs;
 
 mod nutrition;
+mod subagents;
 mod tasks;
 
 pub async fn serve(port: u16) {
@@ -81,7 +82,14 @@ pub async fn serve(port: u16) {
         .route("/api/tasks", get(tasks::api_list).post(tasks::api_create))
         .route("/api/tasks/tree", get(tasks::api_tree))
         .route("/api/tasks/summary", get(tasks::api_summary))
-        .route("/api/tasks/{id}", get(tasks::api_get).patch(tasks::api_update).delete(tasks::api_delete));
+        .route("/api/tasks/{id}", get(tasks::api_get).patch(tasks::api_update).delete(tasks::api_delete))
+        // Subagents (long-running claude -p instances)
+        .route("/api/subagents", get(subagents::api_list))
+        .route("/api/subagents/spawn", post(subagents::api_spawn))
+        .route("/api/subagents/{id}", get(subagents::api_get).delete(subagents::api_delete))
+        .route("/api/subagents/{id}/events", get(subagents::api_events))
+        .route("/api/subagents/{id}/send", post(subagents::api_send))
+        .route("/api/subagents/{id}/stop", post(subagents::api_stop));
 
     // Serve React build
     if let Some(ref dist) = dashboard_dist {

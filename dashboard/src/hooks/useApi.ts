@@ -472,3 +472,74 @@ export async function updateTask(id: number, body: {
 export async function deleteTask(id: number) {
   return api(`/api/tasks/${id}`, { method: 'DELETE' });
 }
+
+// --- Subagents ---
+
+export type SubagentStatus = 'starting' | 'running' | 'completed' | 'killed' | 'failed'
+
+export interface SubagentSummary {
+  id: string;
+  name: string;
+  status: SubagentStatus;
+  model: string;
+  started_at: string;
+  ended_at: string | null;
+  pid: number | null;
+  claude_pid: number | null;
+  exit_code: number | null;
+  elapsed_seconds: number;
+  last_event_preview: string;
+  last_event_type: string;
+}
+
+export interface SubagentMeta {
+  id: string;
+  name: string;
+  system_prompt: string;
+  model: string;
+  cwd: string;
+  started_at: string;
+  ended_at: string | null;
+  status: SubagentStatus;
+  pid: number | null;
+  claude_pid: number | null;
+  exit_code: number | null;
+}
+
+export interface SubagentDetail {
+  meta: SubagentMeta;
+  elapsed_seconds: number;
+  events: any[]; // eslint-disable-line @typescript-eslint/no-explicit-any
+}
+
+export async function listSubagents(): Promise<SubagentSummary[]> {
+  return api('/api/subagents');
+}
+
+export async function getSubagent(id: string): Promise<SubagentDetail> {
+  return api(`/api/subagents/${encodeURIComponent(id)}`);
+}
+
+export async function spawnSubagent(body: { name: string; prompt: string; model?: string; cwd?: string }): Promise<{ id: string }> {
+  return api('/api/subagents/spawn', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+export async function sendSubagent(id: string, message: string) {
+  return api(`/api/subagents/${encodeURIComponent(id)}/send`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message }),
+  });
+}
+
+export async function stopSubagent(id: string) {
+  return api(`/api/subagents/${encodeURIComponent(id)}/stop`, { method: 'POST' });
+}
+
+export async function deleteSubagent(id: string) {
+  return api(`/api/subagents/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
