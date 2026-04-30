@@ -463,33 +463,29 @@ mod gateway {
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
-        // Probe DaveSession::new — verifies davey is wired and the
-        // user/channel snowflakes serialize cleanly into an MLS group_id.
-        // The session sits unused while the rest of the handshake is still
-        // being wired; constructing it here exercises the davey API path
-        // and surfaces any version mismatch early.
-        let _dave_probe = {
-            let v = std::num::NonZeroU16::new(davey::DAVE_PROTOCOL_VERSION)
-                .expect("DAVE_PROTOCOL_VERSION non-zero");
-            match davey::DaveSession::new(v, user_id, channel_id, None) {
-                Ok(_session) => {
-                    eprintln!(
-                        "voice/dave: DaveSession constructed ok (v={}, user={user_id}, channel={channel_id})",
-                        davey::DAVE_PROTOCOL_VERSION
-                    );
-                }
-                Err(e) => {
-                    eprintln!("voice/dave: DaveSession::new failed: {e:?}");
-                }
-            }
-        };
-        let _ = _dave_probe;
-        // v=4 is the pre-DAVE legacy voice gateway. Tested 2026-04-30:
-        // v=8 with max_dave_protocol_version=0 in IDENTIFY still gets
-        // a 4017 "E2EE/DAVE protocol required" close — Discord enforces
-        // DAVE at the URL-version level, not the IDENTIFY-flag level.
-        // We only need plain audio, so v=4 is the right floor.
-        let url = format!("wss://{}/?v=4", endpoint);
+        // Construct a DAVE session up front — we'll move it into the WS
+        // task post-READY. user_id + channel_id snowflakes scope the MLS
+        // group; the session itself is INACTIVE until the gateway sends
+        // op 24 (prepare_epoch) + op 25 (external_sender_package), at which
+        // point we generate a key package and respond with op 26.
+        let dave_version = std::num::NonZeroU16::new(davey::DAVE_PROTOCOL_VERSION)
+            .expect("DAVE_PROTOCOL_VERSION non-zero");
+        let mut dave_session = davey::DaveSession::new(
+            dave_version, user_id, channel_id, None,
+        ).map_err(|e| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("DaveSession::new: {e:?}"),
+        ))?;
+        eprintln!(
+            "voice/dave: DaveSession ready (v={}, user={user_id}, channel={channel_id})",
+            davey::DAVE_PROTOCOL_VERSION
+        );
+        // v=8 is the DAVE-aware voice gateway. We advertise
+        // max_dave_protocol_version=1 in IDENTIFY and handle ops 21-31
+        // in the WS task below; the gateway pushes external_sender_package
+        // (op 25), prepare_epoch (op 24), proposals (op 27), commits
+        // (op 29), and welcomes (op 30) which we route into davey.
+        let url = format!("wss://{}/?v=8", endpoint);
         eprintln!("voice/gateway: connecting url={url} guild={guild_id} user={user_id} session={session_id} token_len={}", token.len());
         let (ws, _resp) = connect_async(&url).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
@@ -525,7 +521,7 @@ mod gateway {
                 user_id: user_id.to_string(),
                 session_id: session_id.to_string(),
                 token: token.to_string(),
-                max_dave_protocol_version: 0,
+                max_dave_protocol_version: 1,
             })
             .map_err(io_err)?,
             seq: None,
@@ -619,27 +615,212 @@ mod gateway {
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Ok(Message::Text(txt))) => {
                             if let Ok(frame) = serde_json::from_str::<Frame>(&txt) {
-                                // If nobody's listening (session dropped
-                                // its receiver), bail.
-                                if in_tx.send(frame).is_err() { break; }
+                                // DAVE JSON ops (21/22/23/24/31) handled
+                                // here pre-channel-forward.
+                                match frame.op {
+                                    21 => {
+                                        // dave_protocol_prepare_transition:
+                                        // {protocol_version, transition_id}.
+                                        // transition_id=0 means reset MLS state.
+                                        if let Some(tid) = frame.d.get("transition_id").and_then(|v| v.as_u64()) {
+                                            if tid == 0 {
+                                                if let Err(e) = dave_session.reset() {
+                                                    eprintln!("voice/dave: reset failed: {e:?}");
+                                                }
+                                                eprintln!("voice/dave: op 21 prepare_transition tid=0, reset");
+                                            } else {
+                                                eprintln!("voice/dave: op 21 prepare_transition tid={tid}");
+                                            }
+                                        }
+                                    }
+                                    22 => {
+                                        // dave_protocol_execute_transition:
+                                        // server signals it's safe to switch
+                                        // ratchets. davey's encryptor handles
+                                        // the active flag internally; just log.
+                                        eprintln!("voice/dave: op 22 execute_transition: {}", frame.d);
+                                    }
+                                    24 => {
+                                        // dave_protocol_prepare_epoch:
+                                        // {protocol_version, epoch}. The next
+                                        // step is to generate + send our
+                                        // key package as op 26 binary.
+                                        eprintln!("voice/dave: op 24 prepare_epoch: {}", frame.d);
+                                        match dave_session.create_key_package() {
+                                            Ok(kp) => {
+                                                let buf = build_binary_frame(0, 26, &kp);
+                                                if sink.send(Message::Binary(buf.into())).await.is_err() {
+                                                    break;
+                                                }
+                                                eprintln!("voice/dave: sent op 26 key_package ({} bytes)", kp.len());
+                                            }
+                                            Err(e) => {
+                                                eprintln!("voice/dave: create_key_package failed: {e:?}");
+                                            }
+                                        }
+                                    }
+                                    31 => {
+                                        eprintln!("voice/dave: op 31 invalid_commit_welcome: {}", frame.d);
+                                    }
+                                    _ => {
+                                        // Non-DAVE text frame — forward to
+                                        // session layer (SESSION_DESCRIPTION,
+                                        // peer SPEAKING, CLIENT_DISCONNECT, etc).
+                                        if in_tx.send(frame).is_err() { break; }
+                                    }
+                                }
                             }
                         }
                         Some(Ok(Message::Binary(b))) => {
                             // DAVE MLS opcodes 25-30 arrive as binary frames
                             // with the layout `[seq:u16 BE][op:u8][payload..]`.
-                            // Until the DAVE handshake state machine is wired,
-                            // log them so we can see what Discord pushes when
-                            // the bot advertises max_dave_protocol_version=1.
-                            if let Some((seq, op, payload)) = parse_binary_frame(&b) {
-                                eprintln!(
-                                    "voice/gateway: binary frame seq={seq} op={op} payload_len={}",
-                                    payload.len()
-                                );
-                            } else {
+                            let Some((seq, op, payload)) = parse_binary_frame(&b) else {
                                 eprintln!(
                                     "voice/gateway: short binary frame ({} bytes), ignoring",
                                     b.len()
                                 );
+                                continue;
+                            };
+                            eprintln!(
+                                "voice/gateway: binary frame seq={seq} op={op} payload_len={}",
+                                payload.len()
+                            );
+                            match op {
+                                25 => {
+                                    // dave_mls_external_sender_package:
+                                    // ExternalSender bytes. Set on the
+                                    // session — this also resets any
+                                    // pre-existing group to a pending one.
+                                    if let Err(e) = dave_session.set_external_sender(payload) {
+                                        eprintln!("voice/dave: set_external_sender failed: {e:?}");
+                                    } else {
+                                        eprintln!("voice/dave: external sender set");
+                                    }
+                                }
+                                27 => {
+                                    // dave_mls_proposals: first byte is the
+                                    // ProposalsOperationType (0=APPEND,
+                                    // 1=REVOKE), rest is the VLBytes-wrapped
+                                    // proposal stream.
+                                    if payload.is_empty() {
+                                        eprintln!("voice/dave: op 27 empty payload");
+                                        continue;
+                                    }
+                                    let optype = match payload[0] {
+                                        0 => davey::ProposalsOperationType::APPEND,
+                                        1 => davey::ProposalsOperationType::REVOKE,
+                                        b => {
+                                            eprintln!("voice/dave: op 27 unknown optype {b}");
+                                            continue;
+                                        }
+                                    };
+                                    match dave_session.process_proposals(optype, &payload[1..], None) {
+                                        Ok(Some(cw)) => {
+                                            // Build op 28 commit_welcome:
+                                            // commit bytes followed by
+                                            // optional welcome bytes.
+                                            let mut out = Vec::with_capacity(
+                                                cw.commit.len() + cw.welcome.as_ref().map_or(0, |w| w.len())
+                                            );
+                                            out.extend_from_slice(&cw.commit);
+                                            if let Some(w) = &cw.welcome {
+                                                out.extend_from_slice(w);
+                                            }
+                                            let buf = build_binary_frame(0, 28, &out);
+                                            if sink.send(Message::Binary(buf.into())).await.is_err() {
+                                                break;
+                                            }
+                                            eprintln!(
+                                                "voice/dave: sent op 28 commit_welcome (commit={}, welcome={})",
+                                                cw.commit.len(),
+                                                cw.welcome.as_ref().map_or(0, |w| w.len())
+                                            );
+                                        }
+                                        Ok(None) => {
+                                            eprintln!("voice/dave: op 27 no commit needed");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_proposals failed: {e:?}");
+                                        }
+                                    }
+                                }
+                                29 => {
+                                    // dave_mls_announce_commit_transition:
+                                    // [transition_id:u16 BE][commit bytes..]
+                                    if payload.len() < 2 {
+                                        eprintln!("voice/dave: op 29 short payload");
+                                        continue;
+                                    }
+                                    let tid = u16::from_be_bytes([payload[0], payload[1]]);
+                                    let commit_bytes = &payload[2..];
+                                    match dave_session.process_commit(commit_bytes) {
+                                        Ok(_) => {
+                                            // Reply with op 23 ready_for_transition.
+                                            let f = Frame {
+                                                op: 23,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                if sink.send(Message::Text(s.into())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            eprintln!("voice/dave: applied commit, sent op 23 tid={tid}");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_commit failed: {e:?}");
+                                            // Send op 31 invalid_commit_welcome.
+                                            let f = Frame {
+                                                op: 31,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                let _ = sink.send(Message::Text(s.into())).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                30 => {
+                                    // dave_mls_welcome:
+                                    // [transition_id:u16 BE][welcome bytes..]
+                                    if payload.len() < 2 {
+                                        eprintln!("voice/dave: op 30 short payload");
+                                        continue;
+                                    }
+                                    let tid = u16::from_be_bytes([payload[0], payload[1]]);
+                                    let welcome_bytes = &payload[2..];
+                                    match dave_session.process_welcome(welcome_bytes) {
+                                        Ok(_) => {
+                                            let f = Frame {
+                                                op: 23,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                if sink.send(Message::Text(s.into())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            eprintln!("voice/dave: applied welcome, sent op 23 tid={tid}");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_welcome failed: {e:?}");
+                                            let f = Frame {
+                                                op: 31,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                let _ = sink.send(Message::Text(s.into())).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    eprintln!("voice/dave: unhandled binary op {op}");
+                                }
                             }
                         }
                         _ => {}
