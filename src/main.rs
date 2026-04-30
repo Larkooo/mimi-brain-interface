@@ -229,6 +229,11 @@ enum TaskCommands {
         /// Result text
         text: String,
     },
+    /// Delete a task's metadata + log files (must not be running)
+    Delete {
+        /// Task id
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -383,6 +388,7 @@ async fn main() {
             TaskCommands::Stop { id } => tasks::cli_stop(&id),
             TaskCommands::SetPid { id, pid } => tasks::cli_set_pid(&id, pid),
             TaskCommands::Result { id, text } => tasks::cli_result(&id, &text),
+            TaskCommands::Delete { id } => tasks::cli_delete(&id),
         },
         Some(Commands::Context { command }) => match command {
             ContextCommands::Recent { limit } => context_buffer::print_recent(limit),
