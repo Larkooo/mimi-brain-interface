@@ -1008,6 +1008,7 @@ dependencies = [
  "dirs",
  "futures-util",
  "libc",
+ "rand 0.9.4",
  "reqwest",
  "rusqlite",
  "serde",

@@ -26,3 +26,11 @@ uuid = { version = "1", features = ["v4"] }
 tokio-tungstenite = { version = "0.27", features = ["native-tls"] }
 futures-util = "0.3"
 base64 = "0.22"
+
+# Voice channel scaffold (feature/discord-voice). The real audio deps —
+# `audiopus` (libopus FFI, needs `apt install libopus-dev autoconf automake
+# libtool pkg-config`) and `xsalsa20poly1305` (Discord voice encryption) —
+# are deliberately NOT pulled in until the gateway code that uses them
+# lands, so master keeps building cleanly on a vanilla VPS. They'll be
+# added in the same commit that adds the first real call site.
+rand = "0.9"
