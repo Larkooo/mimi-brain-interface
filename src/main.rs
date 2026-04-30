@@ -98,6 +98,13 @@ enum SubagentCommands {
         /// Working directory for the claude process (default: ~/.mimi)
         #[arg(long)]
         cwd: Option<String>,
+        /// Discord parent channel id under which to create a dedicated
+        /// progress-report thread for this subagent. When set, a public
+        /// thread is created up front, its id is stored in meta.json as
+        /// `report_channel_id`, and the system prompt is augmented with
+        /// instructions telling the agent to post updates into it.
+        #[arg(long)]
+        report_thread_parent: Option<String>,
     },
     /// (internal) supervisor entrypoint — runs claude under the given id
     #[command(hide = true)]
@@ -458,8 +465,14 @@ async fn main() {
             }
         },
         Some(Commands::Subagent { command }) => match command {
-            SubagentCommands::Spawn { name, prompt, model, cwd } => {
-                subagents::cli_spawn(&name, &prompt, model.as_deref(), cwd.as_deref());
+            SubagentCommands::Spawn { name, prompt, model, cwd, report_thread_parent } => {
+                subagents::cli_spawn(
+                    &name,
+                    &prompt,
+                    model.as_deref(),
+                    cwd.as_deref(),
+                    report_thread_parent.as_deref(),
+                );
             }
             SubagentCommands::Supervise { id } => subagents::cli_supervise(&id),
             SubagentCommands::Send { id, message } => subagents::cli_send(&id, &message),

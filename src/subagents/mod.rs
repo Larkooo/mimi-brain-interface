@@ -60,6 +60,11 @@ pub struct Meta {
     /// PID of the claude child (set by supervisor once spawned).
     #[serde(default)]
     pub claude_pid: Option<i32>,
+    /// Discord thread channel id created at spawn time (when --report-thread-parent
+    /// was passed). The agent posts progress updates into this thread via
+    /// `~/.mimi/bin/discord post <id> ...`.
+    #[serde(default)]
+    pub report_channel_id: Option<String>,
 }
 
 fn meta_path(dir: &Path) -> PathBuf { dir.join("meta.json") }
@@ -132,6 +137,34 @@ fn make_id(name: &str) -> String {
     format!("{slug}-{ts}")
 }
 
+/// Create a public Discord thread under `parent_chan_id` named `name`.
+/// Returns the thread's channel id (a numeric string). Shells out to the
+/// `~/.mimi/bin/discord create-thread` wrapper so all auth + rate-limit
+/// handling lives in one place.
+fn create_discord_thread(parent_chan_id: &str, name: &str) -> Result<String, String> {
+    // paths::home() is the mimi data dir (~/.mimi) — the discord wrapper
+    // lives at ~/.mimi/bin/discord, so this is just ".join("bin/discord")".
+    let bin = paths::home().join("bin/discord");
+    let out = std::process::Command::new(&bin)
+        .arg("create-thread")
+        .arg(parent_chan_id)
+        .arg(name)
+        .output()
+        .map_err(|e| format!("exec {}: {e}", bin.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("discord create-thread failed: {}", stderr.trim()));
+    }
+    let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if id.is_empty() || id == "null" {
+        return Err("discord create-thread returned empty id".into());
+    }
+    if !id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(format!("discord create-thread returned non-numeric id: {id}"));
+    }
+    Ok(id)
+}
+
 fn mkfifo(path: &Path) -> Result<(), String> {
     let cpath = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|e| format!("path nul: {e}"))?;
@@ -159,6 +192,7 @@ pub fn spawn(
     prompt: &str,
     model: Option<&str>,
     cwd: Option<&str>,
+    report_thread_parent: Option<&str>,
 ) -> Result<String, String> {
     paths::ensure_dirs();
     let prompt = resolve_prompt(prompt)?;
@@ -173,10 +207,35 @@ pub fn spawn(
         return Err(format!("cwd does not exist: {}", cwd_resolved.display()));
     }
 
+    // If a parent channel was passed, create a Discord thread up front so
+    // we can bake the channel id into the agent's system prompt. We use
+    // the discord CLI wrapper which handles auth, rate limits, retries.
+    // Thread name: "<name> — <short_id>" where short_id is the timestamp
+    // suffix on the slug (last 13 chars, e.g. "250430-153012").
+    let (report_channel_id, augmented_prompt) = match report_thread_parent {
+        Some(parent) => {
+            let short = id.rsplit_once('-')
+                .map(|(_, ts)| ts.to_string())
+                .unwrap_or_else(|| id.clone());
+            // Discord caps thread names at 100 chars. Reserve 4 for " — " + a couple of slack chars.
+            let mut tname = format!("{name} — {short}");
+            if tname.chars().count() > 100 {
+                tname = tname.chars().take(100).collect();
+            }
+            let chan_id = create_discord_thread(parent, &tname)
+                .map_err(|e| format!("create discord thread under {parent}: {e}"))?;
+            let footer = format!(
+                "\n\n---\nProgress reporting:\nA dedicated Discord thread has been created for your work. Its channel id is `{chan_id}`.\nWhen you have meaningful progress, run:\n  ~/.mimi/bin/discord post {chan_id} '<concise update>'\nDo this on: completion, errors, milestones, or every 10–15 minutes during long work. Don't post for trivial tool calls.",
+            );
+            (Some(chan_id), format!("{prompt}{footer}"))
+        }
+        None => (None, prompt),
+    };
+
     let meta = Meta {
         id: id.clone(),
         name: name.to_string(),
-        system_prompt: prompt,
+        system_prompt: augmented_prompt,
         model: model.unwrap_or(DEFAULT_MODEL).to_string(),
         cwd: cwd_resolved.to_string_lossy().to_string(),
         started_at: now_iso(),
@@ -185,6 +244,7 @@ pub fn spawn(
         pid: None,
         exit_code: None,
         claude_pid: None,
+        report_channel_id,
     };
     write_meta(&dir, &meta)?;
     // Pre-create stream/stderr files so dashboard tail-on-empty works.
@@ -447,6 +507,11 @@ pub fn stop(id: &str) -> Result<(), String> {
     let mut meta = read_meta(id)?;
     let pid = meta.pid.ok_or("no supervisor pid recorded")?;
     if !pid_alive(pid) {
+        // Best-effort: even if the supervisor is gone, sweep any orphaned
+        // descendants by their (former) process group. Worst case it's a
+        // no-op.
+        let _ = killpg_term(pid);
+        let _ = sweep_descendants(pid);
         meta.status = "killed".into();
         meta.ended_at = Some(now_iso());
         write_meta(&agent_dir(id), &meta)?;
@@ -457,9 +522,105 @@ pub fn stop(id: &str) -> Result<(), String> {
     meta.status = "killed".into();
     meta.ended_at = Some(now_iso());
     write_meta(&agent_dir(id), &meta)?;
-    let rc = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
-    if rc != 0 {
+
+    // Cascade: the supervisor calls setsid() at fork, so pgid == supervisor_pid.
+    // Signalling the negated pgid hits the whole tree (claude + its bash
+    // descendants) atomically. Without this, `bash -c 'sleep 600 & wait'`
+    // tool calls leaked.
+    let pgid_kill = killpg_term(pid);
+
+    // Direct SIGTERM to the supervisor too — covers the case where the
+    // process group kill failed (e.g. permission, race) and serves as a
+    // fallback so the supervisor's exit handler still runs and finalizes
+    // meta.json.
+    let direct = unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+
+    // Belt-and-suspenders: if any descendant escaped the process group
+    // (some tool spawned its own setsid daemon), walk /proc and SIGTERM
+    // every process whose ppid-chain leads back to the supervisor pid.
+    let _ = sweep_descendants(pid);
+
+    if pgid_kill.is_err() && direct != 0 {
         return Err(format!("kill({pid}): {}", std::io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// SIGTERM the entire process group whose pgid == `pgid` (i.e. `kill -TERM -<pgid>`).
+fn killpg_term(pgid: i32) -> Result<(), String> {
+    if pgid <= 0 {
+        return Err("invalid pgid".into());
+    }
+    // libc::killpg(pgid, sig) is equivalent to kill(-pgid, sig) on Linux.
+    let rc = unsafe { libc::killpg(pgid as libc::pid_t, libc::SIGTERM) };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(())
+}
+
+/// Walk /proc and SIGTERM every process whose ancestor chain includes `root_pid`.
+/// Intended as a safety net after a process-group SIGTERM, in case something
+/// inside the subagent tree (a tool, a daemon) called setsid() and slipped
+/// out of the original process group.
+fn sweep_descendants(root_pid: i32) -> Result<(), String> {
+    let proc_dir = match fs::read_dir("/proc") {
+        Ok(d) => d,
+        Err(e) => return Err(e.to_string()),
+    };
+    // Build pid -> ppid map.
+    let mut parents: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    for ent in proc_dir.flatten() {
+        let name = match ent.file_name().into_string() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let pid: i32 = match name.parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        // /proc/<pid>/stat: "pid (comm) state ppid ...". comm may contain spaces+parens,
+        // so locate the LAST ')' and parse from there.
+        let rparen = match stat.rfind(')') {
+            Some(i) => i,
+            None => continue,
+        };
+        let after = &stat[rparen + 1..];
+        let mut it = after.split_whitespace();
+        // skip state
+        let _ = it.next();
+        let ppid: i32 = match it.next().and_then(|s| s.parse().ok()) {
+            Some(p) => p,
+            None => continue,
+        };
+        parents.insert(pid, ppid);
+    }
+    // Find every pid whose ancestor chain reaches root_pid.
+    let mut victims: Vec<i32> = Vec::new();
+    for (&pid, _) in parents.iter() {
+        if pid == root_pid { continue; }
+        let mut cur = pid;
+        let mut depth = 0;
+        while depth < 64 {
+            let p = match parents.get(&cur) {
+                Some(&p) => p,
+                None => break,
+            };
+            if p == root_pid {
+                victims.push(pid);
+                break;
+            }
+            if p <= 1 { break; }
+            cur = p;
+            depth += 1;
+        }
+    }
+    for v in victims {
+        unsafe { libc::kill(v as libc::pid_t, libc::SIGTERM); }
     }
     Ok(())
 }
@@ -517,8 +678,14 @@ pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
 
 // ---------- CLI surface (called from main.rs) ----------
 
-pub fn cli_spawn(name: &str, prompt: &str, model: Option<&str>, cwd: Option<&str>) {
-    match spawn(name, prompt, model, cwd) {
+pub fn cli_spawn(
+    name: &str,
+    prompt: &str,
+    model: Option<&str>,
+    cwd: Option<&str>,
+    report_thread_parent: Option<&str>,
+) {
+    match spawn(name, prompt, model, cwd, report_thread_parent) {
         Ok(id) => println!("{id}"),
         Err(e) => {
             eprintln!("Error: {e}");
