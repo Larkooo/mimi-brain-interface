@@ -606,6 +606,117 @@ mod rtp {
 
 mod codec {
     //! `audiopus` wrapper. 48kHz stereo, 20ms frames (960 samples/ch).
+    //!
+    //! Discord voice expects opus frames at 48kHz, 2 channels (stereo),
+    //! 20ms each — that's 960 samples per channel = 1920 interleaved
+    //! samples per frame. The `Encoder` accepts f32 PCM in [-1.0, 1.0]
+    //! and emits raw opus payloads suitable for `rtp::encrypt_packet`.
+    //! The `Decoder` does the inverse for inbound RTP after the AEAD
+    //! step has unwrapped the payload.
+
+    use audiopus::{
+        Application, Channels, SampleRate,
+        coder::{Decoder as OpusDecoder, Encoder as OpusEncoder},
+    };
+
+    pub const SAMPLE_RATE_HZ: i32 = 48_000;
+    pub const CHANNELS: usize = 2;
+    pub const FRAME_SAMPLES_PER_CHANNEL: usize = 960; // 20ms @ 48kHz
+    pub const FRAME_SAMPLES_TOTAL: usize = FRAME_SAMPLES_PER_CHANNEL * CHANNELS;
+    /// Maximum opus payload size we'll accept/emit. Discord recommends
+    /// 1275 bytes (the upper bound of a single opus frame); we leave some
+    /// headroom.
+    pub const MAX_OPUS_FRAME_BYTES: usize = 1500;
+
+    pub struct Encoder {
+        inner: OpusEncoder,
+    }
+
+    impl Encoder {
+        /// Build a new opus encoder configured for Discord voice
+        /// (48kHz, stereo, 20ms frames, low-delay tuning for VoIP).
+        pub fn new() -> std::io::Result<Self> {
+            let inner = OpusEncoder::new(
+                SampleRate::Hz48000,
+                Channels::Stereo,
+                Application::Voip,
+            )
+            .map_err(opus_err)?;
+            Ok(Self { inner })
+        }
+
+        /// Encode one 20ms stereo frame. `pcm` MUST be exactly
+        /// `FRAME_SAMPLES_TOTAL` interleaved f32 samples (960 L / 960 R).
+        pub fn encode(&mut self, pcm: &[f32]) -> std::io::Result<Vec<u8>> {
+            if pcm.len() != FRAME_SAMPLES_TOTAL {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "opus encode: expected {} samples, got {}",
+                        FRAME_SAMPLES_TOTAL,
+                        pcm.len()
+                    ),
+                ));
+            }
+            let mut out = vec![0u8; MAX_OPUS_FRAME_BYTES];
+            let n = self.inner.encode_float(pcm, &mut out).map_err(opus_err)?;
+            out.truncate(n);
+            Ok(out)
+        }
+    }
+
+    pub struct Decoder {
+        inner: OpusDecoder,
+    }
+
+    impl Decoder {
+        pub fn new() -> std::io::Result<Self> {
+            let inner = OpusDecoder::new(SampleRate::Hz48000, Channels::Stereo)
+                .map_err(opus_err)?;
+            Ok(Self { inner })
+        }
+
+        /// Decode one inbound opus frame back into 20ms of interleaved
+        /// stereo f32 PCM. Pass `None` for `frame` to perform packet-loss
+        /// concealment (PLC) when a packet is dropped.
+        pub fn decode(&mut self, frame: Option<&[u8]>) -> std::io::Result<Vec<f32>> {
+            let mut out = vec![0f32; FRAME_SAMPLES_TOTAL];
+            let n = self
+                .inner
+                .decode_float(frame, &mut out, false)
+                .map_err(opus_err)?;
+            out.truncate(n * CHANNELS);
+            Ok(out)
+        }
+    }
+
+    fn opus_err(e: audiopus::Error) -> std::io::Error {
+        std::io::Error::new(std::io::ErrorKind::Other, format!("opus: {e}"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn encode_decode_silence_roundtrip() {
+            let mut enc = Encoder::new().expect("encoder");
+            let mut dec = Decoder::new().expect("decoder");
+            let silence = vec![0.0f32; FRAME_SAMPLES_TOTAL];
+            let opus = enc.encode(&silence).expect("encode");
+            assert!(!opus.is_empty());
+            let pcm = dec.decode(Some(&opus)).expect("decode");
+            // Decoder is allowed to return one full frame.
+            assert_eq!(pcm.len(), FRAME_SAMPLES_TOTAL);
+        }
+
+        #[test]
+        fn encode_rejects_wrong_size() {
+            let mut enc = Encoder::new().expect("encoder");
+            let bad = vec![0.0f32; 100];
+            assert!(enc.encode(&bad).is_err());
+        }
+    }
 }
 
 mod tts {

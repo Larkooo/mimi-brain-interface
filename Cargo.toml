@@ -33,3 +33,4 @@ base64 = "0.22"
 # the RTP encrypted-packet path (Discord voice uses xsalsa20_poly1305_lite).
 rand = "0.9"
 xsalsa20poly1305 = "0.9"
+audiopus = "0.2"
