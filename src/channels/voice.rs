@@ -476,6 +476,132 @@ mod rtp {
         h[8..12].copy_from_slice(&ssrc.to_be_bytes());
         h
     }
+
+    use xsalsa20poly1305::{
+        aead::{Aead, KeyInit},
+        XSalsa20Poly1305,
+    };
+
+    /// Parsed RTP header fields for inbound frames. Discord uses fixed
+    /// V=2 / payload type 0x78, so we only surface the dynamic fields the
+    /// session layer cares about.
+    #[derive(Debug, Clone, Copy)]
+    pub struct RtpHeader {
+        pub seq: u16,
+        pub timestamp: u32,
+        pub ssrc: u32,
+    }
+
+    /// Encrypt one outbound voice packet using `xsalsa20_poly1305_lite`.
+    ///
+    /// Wire format on the UDP socket:
+    ///
+    ///   `[ rtp_header (12 bytes) | xsalsa20poly1305(opus_frame) | nonce_counter (4 bytes BE) ]`
+    ///
+    /// The 24-byte XSalsa20 nonce is `nonce_counter (4 bytes BE) || zeros (20)` —
+    /// Discord's _lite variant. The counter MUST monotonically increase
+    /// across packets; the caller owns it and bumps after each call.
+    /// (Discord docs: <https://discord.com/developers/docs/topics/voice-connections#encrypting-and-sending-voice>)
+    pub fn encrypt_packet(
+        header: &[u8; 12],
+        opus_frame: &[u8],
+        secret_key: &[u8; 32],
+        nonce_counter: &mut u32,
+    ) -> std::io::Result<Vec<u8>> {
+        let cipher = XSalsa20Poly1305::new(secret_key.into());
+        let mut nonce_bytes = [0u8; 24];
+        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
+        let ciphertext = cipher
+            .encrypt(&nonce_bytes.into(), opus_frame)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("xsalsa20poly1305 encrypt: {e}"),
+                )
+            })?;
+        let mut out = Vec::with_capacity(12 + ciphertext.len() + 4);
+        out.extend_from_slice(header);
+        out.extend_from_slice(&ciphertext);
+        // Append the nonce counter so the receiver can derive the same
+        // 24-byte nonce. Per Discord _lite spec.
+        out.extend_from_slice(&nonce_counter.to_be_bytes());
+        *nonce_counter = nonce_counter.wrapping_add(1);
+        Ok(out)
+    }
+
+    /// Decrypt one inbound voice packet (xsalsa20_poly1305_lite). Mirrors
+    /// `encrypt_packet`: pulls the trailing 4-byte nonce counter, builds
+    /// the 24-byte nonce, and returns the raw opus payload along with the
+    /// parsed RTP header.
+    ///
+    /// Returns `InvalidData` if the packet is shorter than the minimum
+    /// (`12 header + 16 poly1305 tag + 4 nonce_counter`) or if AEAD verify
+    /// fails.
+    pub fn decrypt_packet(
+        packet: &[u8],
+        secret_key: &[u8; 32],
+    ) -> std::io::Result<(RtpHeader, Vec<u8>)> {
+        const MIN: usize = 12 + 16 + 4;
+        if packet.len() < MIN {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("rtp packet too short: {} < {}", packet.len(), MIN),
+            ));
+        }
+        let header = RtpHeader {
+            seq: u16::from_be_bytes([packet[2], packet[3]]),
+            timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
+            ssrc: u32::from_be_bytes([packet[8], packet[9], packet[10], packet[11]]),
+        };
+        let nonce_off = packet.len() - 4;
+        let nonce_counter = u32::from_be_bytes([
+            packet[nonce_off],
+            packet[nonce_off + 1],
+            packet[nonce_off + 2],
+            packet[nonce_off + 3],
+        ]);
+        let mut nonce_bytes = [0u8; 24];
+        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
+
+        let ciphertext = &packet[12..nonce_off];
+        let cipher = XSalsa20Poly1305::new(secret_key.into());
+        let plaintext = cipher
+            .decrypt(&nonce_bytes.into(), ciphertext)
+            .map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("xsalsa20poly1305 decrypt: {e}"),
+                )
+            })?;
+        Ok((header, plaintext))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn encrypt_decrypt_roundtrip() {
+            let key = [7u8; 32];
+            let header = rtp_header(42, 9600, 0xDEADBEEF);
+            let payload = b"a fake opus frame";
+            let mut counter: u32 = 1;
+            let packet = encrypt_packet(&header, payload, &key, &mut counter).unwrap();
+            assert_eq!(counter, 2);
+            let (h, decoded) = decrypt_packet(&packet, &key).unwrap();
+            assert_eq!(h.seq, 42);
+            assert_eq!(h.timestamp, 9600);
+            assert_eq!(h.ssrc, 0xDEADBEEF);
+            assert_eq!(decoded, payload);
+        }
+
+        #[test]
+        fn decrypt_rejects_short_packet() {
+            let key = [0u8; 32];
+            let too_short = [0u8; 12 + 16 + 3];
+            assert!(decrypt_packet(&too_short, &key).is_err());
+        }
+    }
 }
 
 mod codec {
