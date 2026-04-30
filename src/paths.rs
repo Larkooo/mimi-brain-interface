@@ -53,6 +53,10 @@ pub fn tasks_dir() -> PathBuf {
     home().join("tasks")
 }
 
+pub fn subagents_dir() -> PathBuf {
+    home().join("subagents")
+}
+
 pub fn ensure_dirs() {
     for dir in [
         home(),
@@ -61,6 +65,7 @@ pub fn ensure_dirs() {
         channels_dir(),
         backups_dir(),
         tasks_dir(),
+        subagents_dir(),
     ] {
         fs::create_dir_all(&dir).ok();
     }

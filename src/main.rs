@@ -5,6 +5,7 @@ mod commands;
 mod context_buffer;
 mod dashboard;
 mod paths;
+mod subagents;
 mod tasks;
 
 use clap::{Parser, Subcommand};
@@ -73,6 +74,69 @@ enum Commands {
     Context {
         #[command(subcommand)]
         command: ContextCommands,
+    },
+    /// Manage long-running subagents (persistent claude -p instances)
+    Subagent {
+        #[command(subcommand)]
+        command: SubagentCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum SubagentCommands {
+    /// Spawn a new long-running subagent. Prints its id on stdout.
+    Spawn {
+        /// Human-readable name (used to slugify the id)
+        #[arg(short, long)]
+        name: String,
+        /// System prompt — inline string, or `@/abs/path/to/file.md`
+        #[arg(short, long)]
+        prompt: String,
+        /// Override the default model
+        #[arg(short, long)]
+        model: Option<String>,
+        /// Working directory for the claude process (default: ~/.mimi)
+        #[arg(long)]
+        cwd: Option<String>,
+    },
+    /// (internal) supervisor entrypoint — runs claude under the given id
+    #[command(hide = true)]
+    Supervise {
+        /// Subagent id
+        id: String,
+    },
+    /// Send a new user-turn message to a running subagent
+    Send {
+        /// Subagent id
+        id: String,
+        /// Message text
+        message: String,
+    },
+    /// List all subagents (newest first)
+    List {
+        /// Filter by status (running, completed, killed, failed)
+        #[arg(short, long)]
+        status: Option<String>,
+    },
+    /// Show a subagent's metadata + last 20 stream events
+    Show {
+        /// Subagent id
+        id: String,
+    },
+    /// Follow a subagent's stream.jsonl (pretty-printed)
+    Tail {
+        /// Subagent id
+        id: String,
+    },
+    /// Stop a running subagent (SIGTERM the supervisor)
+    Stop {
+        /// Subagent id
+        id: String,
+    },
+    /// Remove a subagent's directory (must not be running)
+    Rm {
+        /// Subagent id
+        id: String,
     },
 }
 
@@ -392,6 +456,18 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
+        },
+        Some(Commands::Subagent { command }) => match command {
+            SubagentCommands::Spawn { name, prompt, model, cwd } => {
+                subagents::cli_spawn(&name, &prompt, model.as_deref(), cwd.as_deref());
+            }
+            SubagentCommands::Supervise { id } => subagents::cli_supervise(&id),
+            SubagentCommands::Send { id, message } => subagents::cli_send(&id, &message),
+            SubagentCommands::List { status } => subagents::cli_list(status.as_deref()),
+            SubagentCommands::Show { id } => subagents::cli_show(&id),
+            SubagentCommands::Tail { id } => subagents::cli_tail(&id),
+            SubagentCommands::Stop { id } => subagents::cli_stop(&id),
+            SubagentCommands::Rm { id } => subagents::cli_rm(&id),
         },
     }
 }
