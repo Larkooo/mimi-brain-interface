@@ -125,6 +125,111 @@ mod gateway {
     //! VOICE_SERVER_UPDATE event, runs IDENTIFY → READY → SELECT_PROTOCOL
     //! → SESSION_DESCRIPTION, and emits the resulting secret_key + UDP
     //! endpoint up to `VoiceSession`.
+    //!
+    //! Status: opcode taxonomy + payload structs landed. The connect-loop
+    //! (WS handshake, heartbeat, state machine) is the next commit.
+
+    use serde::{Deserialize, Serialize};
+    use serde_json::Value;
+
+    /// Discord voice gateway opcodes (v8). Subset we care about; full list at
+    /// <https://discord.com/developers/docs/topics/opcodes-and-status-codes#voice>.
+    #[repr(u8)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+    pub enum Op {
+        Identify = 0,
+        SelectProtocol = 1,
+        Ready = 2,
+        Heartbeat = 3,
+        SessionDescription = 4,
+        Speaking = 5,
+        HeartbeatAck = 6,
+        Resume = 7,
+        Hello = 8,
+        Resumed = 9,
+        ClientDisconnect = 13,
+    }
+
+    /// Wire envelope for every voice gateway message. Discord uses `op` +
+    /// untyped `d`; we deserialize `d` into the per-op struct on demand.
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct Frame {
+        pub op: u8,
+        pub d: Value,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub seq: Option<u64>,
+    }
+
+    /// HELLO (op 8). Sent by Discord immediately after the WS handshake;
+    /// tells us how often to heartbeat (in ms, fractional).
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Hello {
+        pub heartbeat_interval: f64,
+    }
+
+    /// IDENTIFY (op 0). First thing we send after HELLO. server_id =
+    /// guild snowflake; user_id is the bot's own id; session_id and token
+    /// come from the main gateway's VOICE_STATE_UPDATE / VOICE_SERVER_UPDATE
+    /// event pair.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Identify {
+        pub server_id: String,
+        pub user_id: String,
+        pub session_id: String,
+        pub token: String,
+    }
+
+    /// READY (op 2). Discord answers with the UDP endpoint we should bind
+    /// to plus our SSRC and the encryption modes it supports.
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct Ready {
+        pub ssrc: u32,
+        pub ip: String,
+        pub port: u16,
+        pub modes: Vec<String>,
+    }
+
+    /// SELECT_PROTOCOL (op 1). After UDP IP-discovery completes we send our
+    /// externally-visible address back so Discord knows where to route RTP.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct SelectProtocol {
+        pub protocol: &'static str, // always "udp"
+        pub data: SelectProtocolData,
+    }
+
+    #[derive(Debug, Clone, Serialize)]
+    pub struct SelectProtocolData {
+        pub address: String,
+        pub port: u16,
+        pub mode: &'static str, // "xsalsa20_poly1305" for now
+    }
+
+    /// SESSION_DESCRIPTION (op 4). Final handshake step: the 32-byte
+    /// secret_key the RTP layer uses for xsalsa20poly1305 encryption.
+    #[derive(Debug, Clone, Deserialize)]
+    pub struct SessionDescription {
+        pub mode: String,
+        pub secret_key: Vec<u8>,
+    }
+
+    /// SPEAKING (op 5). Sent before each transmission so other clients
+    /// know to expect audio. `delay` is always 0 for bots.
+    #[derive(Debug, Clone, Serialize)]
+    pub struct Speaking {
+        pub speaking: u8, // bitfield: 1=mic, 2=soundshare, 4=priority
+        pub delay: u32,
+        pub ssrc: u32,
+    }
+
+    /// HEARTBEAT (op 3). The payload is just a u64 nonce we echo back from
+    /// HEARTBEAT_ACK. We use millisecond-since-unix-epoch by convention.
+    pub fn heartbeat_payload() -> Value {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        serde_json::json!(now)
+    }
 }
 
 mod rtp {
