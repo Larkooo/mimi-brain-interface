@@ -52,9 +52,157 @@
 //!
 //! See `docs/voice-architecture.md` (TODO) for the longer write-up.
 
-#![allow(dead_code)] // some paths only get exercised through CLI wrappers (chunk 12)
+#![allow(dead_code)] // some paths only get exercised through the control server (chunk 12)
+
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use tokio::sync::Mutex;
+
+/// Process-wide registry of live voice sessions, keyed by guild_id.
+/// Lives in the same process as the main Discord gateway (the
+/// `mimi-discord` systemd unit), since `gateway_hooks::send_voice_state_update`
+/// only works when the main gateway is owned by *this* process.
+///
+/// Each guild can host at most one active voice session at a time
+/// (Discord's own constraint — bot can only be in one voice channel
+/// per guild). Calls to `join` while a session is already live drop the
+/// existing one first.
+static REGISTRY: OnceLock<Mutex<HashMap<u64, VoiceSession>>> = OnceLock::new();
+
+fn registry() -> &'static Mutex<HashMap<u64, VoiceSession>> {
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Cached bot user_id (set by the Discord bridge from its READY event).
+/// The voice gateway IDENTIFY needs this; we read it lazily here so the
+/// caller doesn't have to thread it through.
+static BOT_USER_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub fn set_bot_user_id(id: u64) {
+    BOT_USER_ID.store(id, std::sync::atomic::Ordering::SeqCst);
+}
+
+fn bot_user_id() -> Option<u64> {
+    let v = BOT_USER_ID.load(std::sync::atomic::Ordering::SeqCst);
+    if v == 0 { None } else { Some(v) }
+}
+
+/// Top-level CLI / RPC entrypoint: join a voice channel.
+pub async fn ctrl_join(guild_id: u64, channel_id: u64) -> std::io::Result<()> {
+    let user_id = bot_user_id().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "discord bridge not READY yet — bot_user_id unknown",
+        )
+    })?;
+    let mut reg = registry().lock().await;
+    if let Some(existing) = reg.remove(&guild_id) {
+        let _ = existing.leave().await;
+    }
+    let sess = VoiceSession::join(guild_id, channel_id, user_id).await?;
+    reg.insert(guild_id, sess);
+    Ok(())
+}
+
+pub async fn ctrl_say(guild_id: u64, text: &str) -> std::io::Result<()> {
+    let reg = registry().lock().await;
+    let sess = reg.get(&guild_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no live voice session for guild {guild_id}"),
+        )
+    })?;
+    sess.say(text).await
+}
+
+pub async fn ctrl_leave(guild_id: u64) -> std::io::Result<()> {
+    let mut reg = registry().lock().await;
+    let sess = reg.remove(&guild_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no live voice session for guild {guild_id}"),
+        )
+    })?;
+    sess.leave().await
+}
+
+pub async fn ctrl_list() -> Vec<u64> {
+    registry().lock().await.keys().copied().collect()
+}
+
+/// Loopback control server. Bound by the Discord bridge process at
+/// startup so the `discord voice {join,say,leave}` bash wrappers can
+/// reach in and drive a `VoiceSession`.
+///
+/// Bound to `127.0.0.1` only — no external exposure. Default port
+/// 3132 (sits next to the dashboard on 3131); overridable via the
+/// `MIMI_VOICE_CTRL_PORT` env var.
+pub mod control {
+    use axum::{Router, extract::Json, http::StatusCode, routing::post};
+    use serde::Deserialize;
+
+    pub fn port() -> u16 {
+        std::env::var("MIMI_VOICE_CTRL_PORT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(3132)
+    }
+
+    pub async fn serve() {
+        let app = Router::new()
+            .route("/voice/join", post(api_join))
+            .route("/voice/leave", post(api_leave))
+            .route("/voice/say", post(api_say))
+            .route("/voice/list", post(api_list));
+        let bind = format!("127.0.0.1:{}", port());
+        match tokio::net::TcpListener::bind(&bind).await {
+            Ok(listener) => {
+                eprintln!("voice: control server listening on {bind}");
+                if let Err(e) = axum::serve(listener, app).await {
+                    eprintln!("voice: control server crashed: {e}");
+                }
+            }
+            Err(e) => {
+                eprintln!("voice: failed to bind {bind}: {e} — voice CLI wrappers won't work");
+            }
+        }
+    }
+
+    #[derive(Deserialize)]
+    struct JoinReq { guild_id: u64, channel_id: u64 }
+
+    async fn api_join(Json(req): Json<JoinReq>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+        super::ctrl_join(req.guild_id, req.channel_id)
+            .await
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+        Ok(Json(serde_json::json!({ "ok": true, "guild_id": req.guild_id, "channel_id": req.channel_id })))
+    }
+
+    #[derive(Deserialize)]
+    struct LeaveReq { guild_id: u64 }
+
+    async fn api_leave(Json(req): Json<LeaveReq>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+        super::ctrl_leave(req.guild_id)
+            .await
+            .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        Ok(Json(serde_json::json!({ "ok": true, "guild_id": req.guild_id })))
+    }
+
+    #[derive(Deserialize)]
+    struct SayReq { guild_id: u64, text: String }
+
+    async fn api_say(Json(req): Json<SayReq>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+        super::ctrl_say(req.guild_id, &req.text)
+            .await
+            .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+        Ok(Json(serde_json::json!({ "ok": true, "guild_id": req.guild_id })))
+    }
+
+    async fn api_list() -> Json<serde_json::Value> {
+        Json(serde_json::json!({ "guilds": super::ctrl_list().await }))
+    }
+}
 
 /// One live voice connection for a single guild. Thin wrapper over
 /// `session::Live` that exposes the public API surface.

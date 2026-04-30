@@ -276,6 +276,11 @@ pub async fn start() -> Result<(), String> {
     let client = reqwest::Client::new();
     tokio::spawn(send_restart_ping(client.clone(), token.clone()));
     tokio::spawn(typing_loop(client.clone(), token.clone(), typing_rx));
+    // Voice control server — loopback HTTP for the `discord voice ...`
+    // bash wrappers. Belongs in this process because the voice module's
+    // gateway hook needs the main Discord gateway connection that *this*
+    // process owns.
+    tokio::spawn(crate::channels::voice::control::serve());
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
@@ -975,6 +980,9 @@ async fn run_gateway(
         if event == "READY" {
             if let Some(id) = v.pointer("/d/user/id").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()) {
                 BOT_USER_ID.store(id, Ordering::SeqCst);
+                // Mirror to the voice module so VoiceSession::join can
+                // run IDENTIFY without the caller threading the id.
+                crate::channels::voice::set_bot_user_id(id);
                 eprintln!("discord: ready, bot_user_id={id}");
             }
             continue;
