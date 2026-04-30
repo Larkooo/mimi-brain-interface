@@ -319,6 +319,10 @@ mod gateway {
         pub user_id: String,
         pub session_id: String,
         pub token: String,
+        // Opt out of DAVE (E2EE). Discord enforces DAVE on v=8+ unless
+        // we advertise 0 here. Without this we get a 4017 close on
+        // IDENTIFY ("E2EE/DAVE protocol required").
+        pub max_dave_protocol_version: u8,
     }
 
     /// READY (op 2). Discord answers with the UDP endpoint we should bind
@@ -421,10 +425,17 @@ mod gateway {
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
+        // v=4 is the pre-DAVE legacy voice gateway. v=8 introduced DAVE
+        // (E2EE) negotiation and Discord may close with 4017
+        // "E2EE/DAVE protocol required" if our IDENTIFY doesn't drive
+        // that handshake. We only need plain audio so v=4 is the right
+        // floor — sequence numbers (v7) and DAVE (v8) aren't needed.
         let url = format!("wss://{}/?v=8", endpoint);
+        eprintln!("voice/gateway: connecting url={url} guild={guild_id} user={user_id} session={session_id} token_len={}", token.len());
         let (ws, _resp) = connect_async(&url).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
         })?;
+        eprintln!("voice/gateway: ws connected, awaiting HELLO");
         let (mut sink, mut stream) = ws.split();
 
         // 1. Receive HELLO. Anything else here is a protocol violation.
@@ -455,35 +466,50 @@ mod gateway {
                 user_id: user_id.to_string(),
                 session_id: session_id.to_string(),
                 token: token.to_string(),
+                max_dave_protocol_version: 0,
             })
             .map_err(io_err)?,
             seq: None,
         };
-        sink.send(Message::Text(
-            serde_json::to_string(&identify).map_err(io_err)?.into(),
-        ))
+        let identify_json = serde_json::to_string(&identify).map_err(io_err)?;
+        eprintln!("voice/gateway: sending IDENTIFY: {identify_json}");
+        sink.send(Message::Text(identify_json.into()))
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        eprintln!("voice/gateway: IDENTIFY sent, awaiting READY");
 
         // 3. Receive READY (Discord may interleave a HEARTBEAT_ACK or
         //    HELLO-echo, so we loop until we see op 2).
         let ready: Ready = loop {
             match stream.next().await {
                 Some(Ok(Message::Text(txt))) => {
+                    eprintln!("voice/gateway: pre-READY frame: {txt}");
                     let frame: Frame = serde_json::from_str(&txt).map_err(io_err)?;
                     if frame.op == Op::Ready as u8 {
                         break serde_json::from_value(frame.d).map_err(io_err)?;
                     }
                     // Unhandled pre-READY frame — log and continue.
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(Message::Close(cf))) => {
+                    eprintln!("voice/gateway: ws CLOSE frame: {cf:?}");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        format!("voice ws close: {cf:?}"),
+                    ));
+                }
+                Some(Ok(other)) => {
+                    eprintln!("voice/gateway: pre-READY non-text frame: {other:?}");
+                    continue;
+                }
                 Some(Err(e)) => {
+                    eprintln!("voice/gateway: ws stream error: {e}");
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         e.to_string(),
                     ));
                 }
                 None => {
+                    eprintln!("voice/gateway: ws stream ended (None)");
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         "voice ws closed before READY",
@@ -889,106 +915,80 @@ mod codec {
 }
 
 mod tts {
-    //! TTS provider abstraction. Initial impl: OpenAI TTS REST. Returns
-    //! a stream of 48kHz f32 samples for the encoder to chunk.
+    //! TTS provider abstraction. Free-tier impl: Microsoft Edge `edge-tts`
+    //! via Python subprocess (no API key needed). Pipeline:
+    //! `edge-tts -> mp3 -> ffmpeg -> raw f32le PCM @ 48kHz mono` on stdout.
     //!
-    //! API key resolution order:
-    //!   1. `OPENAI_API_KEY` env var (set on the systemd unit or shell)
-    //!   2. `~/.mimi/accounts/openai.json` with `{"api_key": "sk-..."}`
+    //! Env knobs:
+    //!   - `MIMI_TTS_PYTHON`  python interpreter (defaults to the repo venv)
+    //!   - `MIMI_TTS_SCRIPT`  helper script path (defaults to scripts/tts_edge.py)
+    //!   - `MIMI_TTS_VOICE`   edge-tts voice id (default fr-FR-HenriNeural)
+    //!   - `MIMI_TTS_RATE`    edge-tts rate (default +0%)
     //!
-    //! OWNER ACTION REQUIRED if neither is present — `tts::synthesize`
-    //! will return an error at runtime. Drop a key into either location
-    //! and the voice session will pick it up on the next call.
+    //! All resolution is best-effort relative to `$HOME/mimi-brain-interface/`
+    //! so a default systemd deployment "just works".
 
-    use serde::{Deserialize, Serialize};
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
 
-    const OPENAI_TTS_URL: &str = "https://api.openai.com/v1/audio/speech";
-    /// OpenAI TTS supports `pcm` response format: signed-16-bit, 24kHz,
-    /// mono, little-endian. We resample to 48kHz here so the encoder
-    /// gets the canonical Discord rate.
-    const OPENAI_TTS_RATE_HZ: u32 = 24_000;
-    const TARGET_RATE_HZ: u32 = 48_000;
-
-    #[derive(Serialize)]
-    struct TtsRequest<'a> {
-        model: &'a str,
-        input: &'a str,
-        voice: &'a str,
-        response_format: &'a str,
-    }
-
-    #[derive(Deserialize)]
-    struct OpenAiKeyFile {
-        api_key: String,
-    }
-
-    fn load_api_key() -> std::io::Result<String> {
-        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-            if !k.is_empty() { return Ok(k); }
-        }
-        let path = dirs::home_dir()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?
-            .join(".mimi/accounts/openai.json");
-        let body = std::fs::read_to_string(&path).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "OPENAI_API_KEY env var unset and {} not readable: {e}",
-                    path.display()
-                ),
-            )
-        })?;
-        let parsed: OpenAiKeyFile = serde_json::from_str(&body).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("openai.json parse: {e}"),
-            )
-        })?;
-        Ok(parsed.api_key)
-    }
-
-    /// Synthesize `text` via OpenAI TTS and return 48kHz mono f32 PCM.
-    /// The opus encoder expects stereo, so the caller duplicates the
-    /// channel before encoding (cheap; saves a TTS round-trip on a
-    /// stereo voice that nobody can hear the difference on).
     pub async fn synthesize(text: &str) -> std::io::Result<Vec<f32>> {
-        let key = load_api_key()?;
-        let req = TtsRequest {
-            model: "tts-1",       // low-latency tier; tts-1-hd if quality > speed
-            input: text,
-            voice: "alloy",       // sane neutral default; switchable later
-            response_format: "pcm",
-        };
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(OPENAI_TTS_URL)
-            .bearer_auth(&key)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("tts http: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        let home = dirs::home_dir()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?;
+        let python = std::env::var("MIMI_TTS_PYTHON").unwrap_or_else(|_| {
+            home.join("mimi-brain-interface/.venv/bin/python")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let script = std::env::var("MIMI_TTS_SCRIPT").unwrap_or_else(|_| {
+            home.join("mimi-brain-interface/scripts/tts_edge.py")
+                .to_string_lossy()
+                .into_owned()
+        });
+
+        let mut child = Command::new(python)
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("tts spawn: {e}")))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes()).await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("tts stdin: {e}"))
+            })?;
+            // Drop closes stdin -> EOF for the child.
+        }
+
+        let out = child.wait_with_output().await.map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("tts wait: {e}"))
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("openai tts http {status}: {body}"),
+                format!("tts_edge exit={}: {}", out.status, stderr),
             ));
         }
-        let bytes = resp.bytes().await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("tts read: {e}"))
-        })?;
-        // OpenAI returns signed-16 LE PCM mono @ 24kHz.
-        let mut pcm24: Vec<f32> = Vec::with_capacity(bytes.len() / 2);
-        for chunk in bytes.chunks_exact(2) {
-            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-            pcm24.push(s as f32 / 32768.0);
+
+        // Already 48kHz f32 LE mono — just transmute bytes -> f32 little-endian.
+        let bytes = out.stdout;
+        if bytes.len() % 4 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tts pcm not f32-aligned: {} bytes", bytes.len()),
+            ));
         }
-        Ok(linear_resample(&pcm24, OPENAI_TTS_RATE_HZ, TARGET_RATE_HZ))
+        let mut pcm: Vec<f32> = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(pcm)
     }
 
-    /// Trivial linear interpolation resampler. Good enough for speech;
-    /// if we ever care about quality, swap for `dasp_signal` or libsamplerate.
+    /// Trivial linear interpolation resampler. Kept for potential future
+    /// providers that don't emit at the canonical 48 kHz rate.
+    #[allow(dead_code)]
     fn linear_resample(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
         if from_hz == to_hz || input.is_empty() {
             return input.to_vec();
