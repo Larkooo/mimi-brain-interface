@@ -459,9 +459,14 @@ mod gateway {
         endpoint: &str,
         guild_id: u64,
         user_id: u64,
+        channel_id: u64,
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
+        // channel_id is plumbed in for DAVE session construction
+        // (DaveSession::new takes user_id + channel_id to scope the MLS group).
+        // Currently unused while DAVE handshake is still being wired.
+        let _ = channel_id;
         // v=4 is the pre-DAVE legacy voice gateway. Tested 2026-04-30:
         // v=8 with max_dave_protocol_version=0 in IDENTIFY still gets
         // a 4017 "E2EE/DAVE protocol required" close — Discord enforces
@@ -1495,7 +1500,7 @@ mod session {
 
         // 4. Voice gateway IDENTIFY → READY.
         let (mut handshake, ready_state) = gateway::connect(
-            &endpoint, guild_id, user_id, &session_id, &voice_token,
+            &endpoint, guild_id, user_id, channel_id, &session_id, &voice_token,
         ).await?;
 
         // 5. UDP IP-discovery.
