@@ -463,10 +463,27 @@ mod gateway {
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
-        // channel_id is plumbed in for DAVE session construction
-        // (DaveSession::new takes user_id + channel_id to scope the MLS group).
-        // Currently unused while DAVE handshake is still being wired.
-        let _ = channel_id;
+        // Probe DaveSession::new — verifies davey is wired and the
+        // user/channel snowflakes serialize cleanly into an MLS group_id.
+        // The session sits unused while the rest of the handshake is still
+        // being wired; constructing it here exercises the davey API path
+        // and surfaces any version mismatch early.
+        let _dave_probe = {
+            let v = std::num::NonZeroU16::new(davey::DAVE_PROTOCOL_VERSION)
+                .expect("DAVE_PROTOCOL_VERSION non-zero");
+            match davey::DaveSession::new(v, user_id, channel_id, None) {
+                Ok(_session) => {
+                    eprintln!(
+                        "voice/dave: DaveSession constructed ok (v={}, user={user_id}, channel={channel_id})",
+                        davey::DAVE_PROTOCOL_VERSION
+                    );
+                }
+                Err(e) => {
+                    eprintln!("voice/dave: DaveSession::new failed: {e:?}");
+                }
+            }
+        };
+        let _ = _dave_probe;
         // v=4 is the pre-DAVE legacy voice gateway. Tested 2026-04-30:
         // v=8 with max_dave_protocol_version=0 in IDENTIFY still gets
         // a 4017 "E2EE/DAVE protocol required" close — Discord enforces
