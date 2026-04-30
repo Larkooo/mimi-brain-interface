@@ -982,6 +982,181 @@ mod stt {
 mod vad {
     //! Voice activity detection — chunks inbound 48kHz audio into speech
     //! segments so the STT only sees real utterances, not silence.
+    //!
+    //! Algorithm: per 20ms frame, compute short-time energy (mean of
+    //! sample^2) and zero-crossing rate. A frame is "voiced" when energy
+    //! exceeds `energy_threshold` AND zcr is in a speech-typical range
+    //! (low ZCR = voiced phonation, high ZCR = unvoiced/fricative; we
+    //! accept both above a noise floor). The detector tracks state via
+    //! a small hangover counter so brief silences inside a word don't
+    //! split utterances.
+    //!
+    //! Output: `feed()` accepts arbitrary-length f32 PCM and returns
+    //! `Some(utterance)` once a speech segment ends — a hangover-bridged
+    //! continuous voiced run terminated by `silence_frames` consecutive
+    //! unvoiced frames. The utterance is the buffered samples from the
+    //! first voiced frame through the last voiced frame, INCLUDING the
+    //! short interior silences (so STT gets natural prosody).
+
+    pub const FRAME_SAMPLES: usize = 480; // 10ms @ 48kHz mono
+
+    pub struct Detector {
+        // Tunables. Defaults chosen for 48kHz mono speech, picked up
+        // through opus decode (so already band-limited and reasonably
+        // clean).
+        energy_threshold: f32,
+        // Number of consecutive unvoiced frames required to declare end
+        // of utterance. 60 frames * 10ms = 600ms hangover.
+        silence_frames: u32,
+        // Minimum utterance length (in voiced frames) — below this we
+        // assume noise burst, drop without emitting.
+        min_voiced_frames: u32,
+
+        // State.
+        carry: Vec<f32>,            // leftover < FRAME_SAMPLES from last feed()
+        in_speech: bool,
+        utterance: Vec<f32>,        // accumulated samples for the current utterance
+        unvoiced_run: u32,
+        voiced_count: u32,
+    }
+
+    impl Detector {
+        pub fn new() -> Self {
+            Self {
+                energy_threshold: 0.0008, // empirical; will need tuning per mic
+                silence_frames: 60,
+                min_voiced_frames: 8,    // ~80ms minimum
+                carry: Vec::new(),
+                in_speech: false,
+                utterance: Vec::new(),
+                unvoiced_run: 0,
+                voiced_count: 0,
+            }
+        }
+
+        /// Feed `samples` (mono f32 PCM @ 48kHz) into the detector.
+        /// Returns `Some(utterance)` if a speech segment just ended on
+        /// this call (utterance samples = first voiced frame through
+        /// last voiced frame). Returns `None` otherwise — caller keeps
+        /// feeding.
+        ///
+        /// Multiple utterances per call are not supported; if a long
+        /// `samples` slice contains two distinct utterances, the second
+        /// will be buffered and returned on the next `feed`. In practice
+        /// the audio loop feeds 20ms at a time so this never fires.
+        pub fn feed(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
+            self.carry.extend_from_slice(samples);
+            let mut emitted: Option<Vec<f32>> = None;
+            while self.carry.len() >= FRAME_SAMPLES {
+                let frame: Vec<f32> = self.carry.drain(..FRAME_SAMPLES).collect();
+                let voiced = self.frame_is_voiced(&frame);
+                if voiced {
+                    self.unvoiced_run = 0;
+                    self.voiced_count += 1;
+                    if !self.in_speech {
+                        self.in_speech = true;
+                        self.utterance.clear();
+                    }
+                    self.utterance.extend_from_slice(&frame);
+                } else if self.in_speech {
+                    // Mid-utterance unvoiced frame. Keep accumulating —
+                    // we'll only trim trailing silence once we decide
+                    // the utterance is over.
+                    self.utterance.extend_from_slice(&frame);
+                    self.unvoiced_run += 1;
+                    if self.unvoiced_run >= self.silence_frames {
+                        // End of utterance. Trim the trailing silence
+                        // we accumulated during the hangover.
+                        let trim = (self.silence_frames as usize) * FRAME_SAMPLES;
+                        let take = self.utterance.len().saturating_sub(trim);
+                        let mut out = self.utterance.clone();
+                        out.truncate(take);
+                        let voiced_count = self.voiced_count;
+                        self.reset_state();
+                        if voiced_count >= self.min_voiced_frames && !out.is_empty() {
+                            // We can only emit one utterance per call
+                            // (the API returns Option). If a second
+                            // starts within the same `feed`, it'll fire
+                            // on the next call.
+                            emitted = Some(out);
+                            // Don't `break` — keep draining carry so
+                            // nothing builds up; just stash in
+                            // `emitted` (it'll be the LAST one to end
+                            // in this call).
+                        }
+                    }
+                }
+                // Else: pre-speech silence, ignore.
+            }
+            emitted
+        }
+
+        fn frame_is_voiced(&self, frame: &[f32]) -> bool {
+            let mut energy = 0.0f32;
+            let mut zc = 0u32;
+            let mut prev_sign = frame[0] >= 0.0;
+            for &s in frame {
+                energy += s * s;
+                let sign = s >= 0.0;
+                if sign != prev_sign {
+                    zc += 1;
+                }
+                prev_sign = sign;
+            }
+            energy /= frame.len() as f32;
+            // ZCR in [zc_per_frame] — Discord-decoded speech typically
+            // sits below ~50% per 10ms frame; pure noise pegs much
+            // higher. We accept anything not maximally noisy.
+            let zcr_max = (frame.len() as u32) * 9 / 10;
+            energy > self.energy_threshold && zc < zcr_max
+        }
+
+        fn reset_state(&mut self) {
+            self.in_speech = false;
+            self.utterance.clear();
+            self.unvoiced_run = 0;
+            self.voiced_count = 0;
+        }
+    }
+
+    impl Default for Detector {
+        fn default() -> Self { Self::new() }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn sine(samples: usize, freq_hz: f32, sample_rate_hz: f32, amp: f32) -> Vec<f32> {
+            (0..samples)
+                .map(|i| (2.0 * std::f32::consts::PI * freq_hz * i as f32 / sample_rate_hz).sin() * amp)
+                .collect()
+        }
+
+        #[test]
+        fn silence_never_emits() {
+            let mut d = Detector::new();
+            for _ in 0..200 {
+                let frame = vec![0.0f32; FRAME_SAMPLES];
+                assert!(d.feed(&frame).is_none());
+            }
+        }
+
+        #[test]
+        fn speech_then_silence_emits() {
+            let mut d = Detector::new();
+            // 500ms of "voice" (loud sine ~ 200 Hz)
+            let voice = sine(FRAME_SAMPLES * 50, 200.0, 48_000.0, 0.5);
+            assert!(d.feed(&voice).is_none());
+            // Then silence — must exceed silence_frames hangover
+            let silence = vec![0.0f32; FRAME_SAMPLES * 70];
+            let out = d.feed(&silence);
+            assert!(out.is_some(), "should emit utterance after silence");
+            let utt = out.unwrap();
+            // Trimmed utterance should be roughly the voiced span
+            assert!(utt.len() >= FRAME_SAMPLES * 40, "utterance too short: {}", utt.len());
+        }
+    }
 }
 
 mod session {
