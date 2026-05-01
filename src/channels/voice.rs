@@ -1245,13 +1245,18 @@ mod codec {
 mod tts {
     //! TTS provider abstraction. Free-tier impl: Microsoft Edge `edge-tts`
     //! via Python subprocess (no API key needed). Pipeline:
-    //! `edge-tts -> mp3 -> ffmpeg -> raw f32le PCM @ 48kHz mono` on stdout.
+    //! `edge-tts CLI -> mp3 -> ffmpeg -> raw f32le PCM @ 48kHz mono` on stdout.
+    //!
+    //! The helper script shells out to the `edge-tts` binary on PATH (pipx
+    //! installs it at `~/.local/bin/edge-tts`), so the system Python works
+    //! — no project venv with `import edge_tts` required.
     //!
     //! Env knobs:
-    //!   - `MIMI_TTS_PYTHON`  python interpreter (defaults to the repo venv)
-    //!   - `MIMI_TTS_SCRIPT`  helper script path (defaults to scripts/tts_edge.py)
-    //!   - `MIMI_TTS_VOICE`   edge-tts voice id (default fr-FR-HenriNeural)
-    //!   - `MIMI_TTS_RATE`    edge-tts rate (default +0%)
+    //!   - `MIMI_TTS_PYTHON`   python interpreter (default: `python3` on PATH)
+    //!   - `MIMI_TTS_SCRIPT`   helper script path (defaults to scripts/tts_edge.py)
+    //!   - `MIMI_TTS_VOICE`    edge-tts voice id (default fr-FR-HenriNeural)
+    //!   - `MIMI_TTS_RATE`     edge-tts rate (default +0%)
+    //!   - `MIMI_TTS_EDGE_BIN` override edge-tts binary path
     //!
     //! All resolution is best-effort relative to `$HOME/mimi-brain-interface/`
     //! so a default systemd deployment "just works".
@@ -1262,11 +1267,8 @@ mod tts {
     pub async fn synthesize(text: &str) -> std::io::Result<Vec<f32>> {
         let home = dirs::home_dir()
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?;
-        let python = std::env::var("MIMI_TTS_PYTHON").unwrap_or_else(|_| {
-            home.join("mimi-brain-interface/.venv/bin/python")
-                .to_string_lossy()
-                .into_owned()
-        });
+        let python = std::env::var("MIMI_TTS_PYTHON")
+            .unwrap_or_else(|_| "python3".to_string());
         let script = std::env::var("MIMI_TTS_SCRIPT").unwrap_or_else(|_| {
             home.join("mimi-brain-interface/scripts/tts_edge.py")
                 .to_string_lossy()
