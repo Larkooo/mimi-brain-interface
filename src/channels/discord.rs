@@ -16,6 +16,109 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::paths;
 
+#[allow(dead_code)] // surfaces are consumed by `voice::session` (next chunk)
+pub mod gateway_hooks {
+    //! Hooks into the long-lived main Discord gateway connection. Voice
+    //! channels need two things from the main gateway:
+    //!
+    //!   1. A way to *send* `VOICE_STATE_UPDATE` (op 4), which tells
+    //!      Discord we want to join/leave a voice channel.
+    //!   2. A way to *receive* the matching `VOICE_STATE_UPDATE` and
+    //!      `VOICE_SERVER_UPDATE` events Discord sends back, which
+    //!      together carry the `session_id` + `token` + voice gateway
+    //!      `endpoint` that the voice WS handshake needs.
+    //!
+    //! Both routes are additive over the existing gateway loop —
+    //! `run_gateway` populates `OUT_TX` after IDENTIFY (so we can push
+    //! arbitrary JSON frames out the wire) and dispatches matching
+    //! inbound dispatch events into every `subscribe()`-returned
+    //! receiver. The voice session layer owns the orchestration.
+    use tokio::sync::{Mutex, mpsc};
+
+    /// Outbound JSON-string queue. The drain task holds the WS writer
+    /// mutex so we don't have to expose it. Repopulated by the gateway
+    /// loop on each reconnect (the previous Sender's receiver gets
+    /// dropped, so any in-flight send returns Err and the caller can
+    /// retry). `RwLock<Option<...>>` rather than `OnceLock` because we
+    /// need to *replace* the Sender on reconnect, not just set it once.
+    pub(super) static OUT_TX: tokio::sync::RwLock<Option<mpsc::UnboundedSender<String>>> =
+        tokio::sync::RwLock::const_new(None);
+
+    /// Inbound voice event channel. Each call to `subscribe_voice_events`
+    /// pushes a sender; the dispatch loop fans every matching event to
+    /// all of them. We never garbage-collect closed senders inside the
+    /// fast path — instead the dispatcher drops them on its next tick
+    /// when send fails.
+    pub(super) static VOICE_EVENT_SUBS: Mutex<Vec<mpsc::UnboundedSender<VoiceEvent>>> =
+        Mutex::const_new(Vec::new());
+
+    /// One voice event lifted off the main gateway. Both variants are
+    /// emitted in response to a `VOICE_STATE_UPDATE` (op 4) the bot just
+    /// sent, and the voice session layer needs *both* before it can
+    /// connect to the voice gateway.
+    #[derive(Debug, Clone)]
+    pub enum VoiceEvent {
+        /// Discord echoes our voice-channel-join with our session_id.
+        StateUpdate {
+            guild_id: u64,
+            channel_id: Option<u64>, // None on disconnect
+            user_id: u64,
+            session_id: String,
+        },
+        /// Discord hands out the voice gateway endpoint + token.
+        ServerUpdate {
+            guild_id: u64,
+            endpoint: String,
+            token: String,
+        },
+    }
+
+    /// Send a `VOICE_STATE_UPDATE` (op 4) on the main gateway. Pass
+    /// `Some(channel_id)` to join, `None` to disconnect.
+    ///
+    /// Returns `Err` if the gateway hasn't connected yet (so the OUT_TX
+    /// is empty). Caller should retry or wait for READY.
+    pub async fn send_voice_state_update(
+        guild_id: u64,
+        channel_id: Option<u64>,
+        self_mute: bool,
+        self_deaf: bool,
+    ) -> Result<(), String> {
+        let payload = serde_json::json!({
+            "op": 4,
+            "d": {
+                "guild_id": guild_id.to_string(),
+                "channel_id": channel_id.map(|c| c.to_string()),
+                "self_mute": self_mute,
+                "self_deaf": self_deaf,
+            }
+        });
+        let guard = OUT_TX.read().await;
+        let tx = guard
+            .as_ref()
+            .ok_or_else(|| "discord gateway not yet connected".to_string())?;
+        tx.send(payload.to_string())
+            .map_err(|e| format!("voice_state_update send: {e}"))
+    }
+
+    /// Subscribe to voice events. The returned receiver gets every
+    /// `StateUpdate`/`ServerUpdate` the gateway sees from now on. Drop
+    /// the receiver to unsubscribe; the dispatcher GC-prunes closed
+    /// senders on its next dispatch.
+    pub async fn subscribe_voice_events() -> mpsc::UnboundedReceiver<VoiceEvent> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        VOICE_EVENT_SUBS.lock().await.push(tx);
+        rx
+    }
+
+    /// Internal: dispatch a voice event to all live subscribers,
+    /// dropping any whose receivers have been closed.
+    pub(super) async fn dispatch(event: VoiceEvent) {
+        let mut subs = VOICE_EVENT_SUBS.lock().await;
+        subs.retain(|tx| tx.send(event.clone()).is_ok());
+    }
+}
+
 // Default owner if access.json is missing or unreadable. Supersedable by
 // `~/.mimi/channels/discord/access.json`.
 const DEFAULT_OWNER_ID: u64 = 445355215013806081;
@@ -119,12 +222,16 @@ The message below is from a STRICT_GUEST Discord user (see `permission=\"strict_
 - If the guest asks for anything above, refuse in one short sentence and do not elaborate on why beyond \"restricted access\".\n\
 </system-reminder>\n";
 
-// Intents: GUILDS, GUILD_MESSAGES, GUILD_MESSAGE_REACTIONS, DIRECT_MESSAGES,
-// DIRECT_MESSAGE_REACTIONS, MESSAGE_CONTENT (privileged). MESSAGE_CONTENT
-// is enabled so the REST API populates `content` for non-mention messages,
-// which we use for historical channel analysis (style profiling, etc.).
-// Privileged intent must also be toggled on in the Discord developer portal.
+// Intents: GUILDS, GUILD_VOICE_STATES, GUILD_MESSAGES,
+// GUILD_MESSAGE_REACTIONS, DIRECT_MESSAGES, DIRECT_MESSAGE_REACTIONS,
+// MESSAGE_CONTENT (privileged). MESSAGE_CONTENT is enabled so the REST
+// API populates `content` for non-mention messages, which we use for
+// historical channel analysis (style profiling, etc.). Privileged intent
+// must also be toggled on in the Discord developer portal.
+// GUILD_VOICE_STATES is required to receive VOICE_STATE_UPDATE events
+// in response to our own join requests (for the `voice` feature).
 const INTENTS: u64 = (1 << 0)   // GUILDS
+    | (1 << 7)                  // GUILD_VOICE_STATES
     | (1 << 9)                  // GUILD_MESSAGES
     | (1 << 10)                 // GUILD_MESSAGE_REACTIONS
     | (1 << 12)                 // DIRECT_MESSAGES
@@ -169,6 +276,11 @@ pub async fn start() -> Result<(), String> {
     let client = reqwest::Client::new();
     tokio::spawn(send_restart_ping(client.clone(), token.clone()));
     tokio::spawn(typing_loop(client.clone(), token.clone(), typing_rx));
+    // Voice control server — loopback HTTP for the `discord voice ...`
+    // bash wrappers. Belongs in this process because the voice module's
+    // gateway hook needs the main Discord gateway connection that *this*
+    // process owns.
+    tokio::spawn(crate::channels::voice::control::serve());
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
@@ -825,12 +937,36 @@ async fn run_gateway(
         }
     });
 
+    // Outbound JSON-frame drain — lets `gateway_hooks::send_voice_state_update`
+    // (and any other future caller) push a payload that gets serialized onto
+    // the same WS sink the heartbeat task uses. We use a per-connection
+    // mpsc; the OnceLock holds the Sender and only ever points at the most
+    // recent connection's drain. Reconnects rebind it.
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
+    // Replace any stale Sender from a previous connection. The old Sender's
+    // receiver was dropped when its drain_task exited; updating the slot
+    // means future `send_voice_state_update` calls hit the new socket.
+    *gateway_hooks::OUT_TX.write().await = Some(out_tx);
+    let drain_write = std::sync::Arc::clone(&write);
+    let drain_task = tokio::spawn(async move {
+        while let Some(payload) = out_rx.recv().await {
+            let mut w = drain_write.lock().await;
+            if w.send(Message::Text(payload.into())).await.is_err() {
+                break;
+            }
+        }
+    });
+
     // Main event loop
     while let Some(msg) = read.next().await {
         let msg = msg.map_err(|e| format!("ws read: {e}"))?;
         let text = match msg {
             Message::Text(t) => t.to_string(),
-            Message::Close(_) => { hb_task.abort(); return Err("gateway closed".into()); }
+            Message::Close(_) => {
+                hb_task.abort();
+                drain_task.abort();
+                return Err("gateway closed".into());
+            }
             _ => continue,
         };
         let v: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
@@ -844,6 +980,9 @@ async fn run_gateway(
         if event == "READY" {
             if let Some(id) = v.pointer("/d/user/id").and_then(|x| x.as_str()).and_then(|s| s.parse::<u64>().ok()) {
                 BOT_USER_ID.store(id, Ordering::SeqCst);
+                // Mirror to the voice module so VoiceSession::join can
+                // run IDENTIFY without the caller threading the id.
+                crate::channels::voice::set_bot_user_id(id);
                 eprintln!("discord: ready, bot_user_id={id}");
             }
             continue;
@@ -852,6 +991,48 @@ async fn run_gateway(
         if event == "MESSAGE_REACTION_ADD" {
             if let Some(d) = v.get("d") {
                 handle_reaction_add(client, token, d).await;
+            }
+            continue;
+        }
+
+        if event == "VOICE_STATE_UPDATE" {
+            if let Some(d) = v.get("d") {
+                let guild_id: u64 = d.get("guild_id").and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                let user_id: u64 = d.get("user_id").and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                // Only forward our own state updates — the voice session
+                // layer doesn't care about other users' join/leave noise
+                // (yet). When we want speaker presence, swap this for a
+                // separate event variant.
+                let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
+                if user_id == bot_id && guild_id != 0 {
+                    let channel_id: Option<u64> = d.get("channel_id")
+                        .and_then(|x| x.as_str())
+                        .and_then(|s| s.parse().ok());
+                    let session_id = d.get("session_id").and_then(|x| x.as_str())
+                        .unwrap_or("").to_string();
+                    gateway_hooks::dispatch(gateway_hooks::VoiceEvent::StateUpdate {
+                        guild_id, channel_id, user_id, session_id,
+                    }).await;
+                }
+            }
+            continue;
+        }
+
+        if event == "VOICE_SERVER_UPDATE" {
+            if let Some(d) = v.get("d") {
+                let guild_id: u64 = d.get("guild_id").and_then(|x| x.as_str())
+                    .and_then(|s| s.parse().ok()).unwrap_or(0);
+                let endpoint = d.get("endpoint").and_then(|x| x.as_str())
+                    .unwrap_or("").to_string();
+                let token_v = d.get("token").and_then(|x| x.as_str())
+                    .unwrap_or("").to_string();
+                if guild_id != 0 && !endpoint.is_empty() && !token_v.is_empty() {
+                    gateway_hooks::dispatch(gateway_hooks::VoiceEvent::ServerUpdate {
+                        guild_id, endpoint, token: token_v,
+                    }).await;
+                }
             }
             continue;
         }
@@ -1077,5 +1258,6 @@ async fn run_gateway(
     }
 
     hb_task.abort();
+    drain_task.abort();
     Err("gateway stream ended".into())
 }
