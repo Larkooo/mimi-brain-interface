@@ -18,9 +18,10 @@
 //!                    event). Handles HELLO/IDENTIFY/SELECT_PROTOCOL/READY,
 //!                    plus the heartbeat keepalive. Hands the UDP endpoint
 //!                    + secret_key to the RTP layer.
-//!   2. `rtp`       — UDP socket. Sends 20ms opus frames wrapped in RTP+
-//!                    xsalsa20poly1305 encryption. Reads inbound RTP, keeps
-//!                    per-SSRC streams, and demuxes them back to the caller.
+//!   2. `rtp`       — UDP socket. Sends 20ms opus frames wrapped in RTP +
+//!                    AEAD (aead_aes256_gcm_rtpsize) encryption. Reads
+//!                    inbound RTP, keeps per-SSRC streams, and demuxes
+//!                    them back to the caller.
 //!   3. `codec`     — thin wrapper around `audiopus` for stereo 48kHz opus.
 //!   4. `tts`       — provider client (initially OpenAI TTS via REST,
 //!                    HTTP/2 stream into the encoder). Pluggable trait so
@@ -384,11 +385,11 @@ mod gateway {
     pub struct SelectProtocolData {
         pub address: String,
         pub port: u16,
-        pub mode: &'static str, // "xsalsa20_poly1305" for now
+        pub mode: &'static str, // e.g. "aead_aes256_gcm_rtpsize"
     }
 
     /// SESSION_DESCRIPTION (op 4). Final handshake step: the 32-byte
-    /// secret_key the RTP layer uses for xsalsa20poly1305 encryption.
+    /// secret_key the RTP layer uses for AEAD encryption.
     #[derive(Debug, Clone, Deserialize)]
     pub struct SessionDescription {
         pub mode: String,
@@ -853,13 +854,9 @@ mod gateway {
 
 mod rtp {
     //! UDP RTP send/receive. 20ms opus frames, sequence + timestamp
-    //! bookkeeping, xsalsa20poly1305 encryption with the secret_key from
-    //! the gateway. Inbound: per-SSRC demux into separate audio streams.
-    //!
-    //! Status this commit: UDP socket bind + IP discovery (the 74-byte
-    //! handshake Discord uses to tell the bot what its public-facing
-    //! ip:port is). Encrypted RTP send/receive lands once xsalsa20poly1305
-    //! is added to Cargo.toml.
+    //! bookkeeping, AEAD encryption (aead_aes256_gcm_rtpsize) with the
+    //! secret_key from the gateway. Inbound: per-SSRC demux into separate
+    //! audio streams.
 
     use tokio::net::UdpSocket;
 
@@ -930,9 +927,9 @@ mod rtp {
         h
     }
 
-    use xsalsa20poly1305::{
-        aead::{Aead, KeyInit},
-        XSalsa20Poly1305,
+    use aes_gcm::{
+        Aes256Gcm, Nonce,
+        aead::{Aead, KeyInit, Payload},
     };
 
     /// Parsed RTP header fields for inbound frames. Discord uses fixed
@@ -945,54 +942,90 @@ mod rtp {
         pub ssrc: u32,
     }
 
-    /// Encrypt one outbound voice packet using `xsalsa20_poly1305_lite`.
+    /// Negotiated voice encryption mode. Discord's READY frame advertises
+    /// the strings; we map those to this enum at handshake time so the hot
+    /// path doesn't re-parse on every packet.
     ///
-    /// Wire format on the UDP socket:
+    /// Currently only `Aes256GcmRtpSize` is implemented — `XChaCha20RtpSize`
+    /// is left as a placeholder so the SELECT_PROTOCOL path can fall back
+    /// gracefully if Discord ever drops aes-gcm.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CipherMode {
+        Aes256GcmRtpSize,
+        XChaCha20RtpSize,
+    }
+
+    impl CipherMode {
+        pub fn from_str(s: &str) -> Option<Self> {
+            match s {
+                "aead_aes256_gcm_rtpsize" => Some(Self::Aes256GcmRtpSize),
+                "aead_xchacha20_poly1305_rtpsize" => Some(Self::XChaCha20RtpSize),
+                _ => None,
+            }
+        }
+    }
+
+    /// Encrypt one outbound voice packet under the negotiated AEAD mode.
     ///
-    ///   `[ rtp_header (12 bytes) | xsalsa20poly1305(opus_frame) | nonce_counter (4 bytes BE) ]`
+    /// Wire format on the UDP socket (both `aead_*_rtpsize` modes share it):
     ///
-    /// The 24-byte XSalsa20 nonce is `nonce_counter (4 bytes BE) || zeros (20)` —
-    /// Discord's _lite variant. The counter MUST monotonically increase
-    /// across packets; the caller owns it and bumps after each call.
-    /// (Discord docs: <https://discord.com/developers/docs/topics/voice-connections#encrypting-and-sending-voice>)
+    ///   `[ rtp_header (12 bytes) | ciphertext | tag (16 bytes) | nonce_counter (4 bytes BE) ]`
+    ///
+    /// AAD is the unencrypted RTP header. The 4-byte nonce counter is
+    /// extended to a 12-byte AEAD nonce by prepending 8 zero bytes
+    /// (`nonce96 = [0u8;8] || nonce32_be`). The counter MUST monotonically
+    /// increase across packets; the caller owns it and bumps after each call.
+    /// (Discord docs: <https://discord.com/developers/docs/topics/voice-connections#transport-encryption-modes>)
     pub fn encrypt_packet(
         header: &[u8; 12],
         opus_frame: &[u8],
         secret_key: &[u8; 32],
         nonce_counter: &mut u32,
+        mode: CipherMode,
     ) -> std::io::Result<Vec<u8>> {
-        let cipher = XSalsa20Poly1305::new(secret_key.into());
-        let mut nonce_bytes = [0u8; 24];
-        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
-        let ciphertext = cipher
-            .encrypt(&nonce_bytes.into(), opus_frame)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("xsalsa20poly1305 encrypt: {e}"),
-                )
-            })?;
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[8..12].copy_from_slice(&nonce_counter.to_be_bytes());
+        let ciphertext = match mode {
+            CipherMode::Aes256GcmRtpSize => {
+                let cipher = Aes256Gcm::new(secret_key.into());
+                cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce_bytes),
+                        Payload { msg: opus_frame, aad: header },
+                    )
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("aes256-gcm encrypt: {e}"),
+                        )
+                    })?
+            }
+            CipherMode::XChaCha20RtpSize => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "aead_xchacha20_poly1305_rtpsize: not implemented",
+                ));
+            }
+        };
         let mut out = Vec::with_capacity(12 + ciphertext.len() + 4);
         out.extend_from_slice(header);
         out.extend_from_slice(&ciphertext);
-        // Append the nonce counter so the receiver can derive the same
-        // 24-byte nonce. Per Discord _lite spec.
         out.extend_from_slice(&nonce_counter.to_be_bytes());
         *nonce_counter = nonce_counter.wrapping_add(1);
         Ok(out)
     }
 
-    /// Decrypt one inbound voice packet (xsalsa20_poly1305_lite). Mirrors
-    /// `encrypt_packet`: pulls the trailing 4-byte nonce counter, builds
-    /// the 24-byte nonce, and returns the raw opus payload along with the
-    /// parsed RTP header.
+    /// Decrypt one inbound voice packet under the negotiated AEAD mode.
+    /// Mirrors `encrypt_packet`: split off the trailing 4-byte nonce counter,
+    /// reconstruct the 96-bit nonce, AEAD-verify with the 12-byte RTP header
+    /// as AAD.
     ///
     /// Returns `InvalidData` if the packet is shorter than the minimum
-    /// (`12 header + 16 poly1305 tag + 4 nonce_counter`) or if AEAD verify
-    /// fails.
+    /// (`12 header + 16 tag + 4 nonce_counter`) or if AEAD verify fails.
     pub fn decrypt_packet(
         packet: &[u8],
         secret_key: &[u8; 32],
+        mode: CipherMode,
     ) -> std::io::Result<(RtpHeader, Vec<u8>)> {
         const MIN: usize = 12 + 16 + 4;
         if packet.len() < MIN {
@@ -1001,6 +1034,7 @@ mod rtp {
                 format!("rtp packet too short: {} < {}", packet.len(), MIN),
             ));
         }
+        let header_bytes: [u8; 12] = packet[..12].try_into().unwrap();
         let header = RtpHeader {
             seq: u16::from_be_bytes([packet[2], packet[3]]),
             timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
@@ -1013,19 +1047,32 @@ mod rtp {
             packet[nonce_off + 2],
             packet[nonce_off + 3],
         ]);
-        let mut nonce_bytes = [0u8; 24];
-        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[8..12].copy_from_slice(&nonce_counter.to_be_bytes());
 
         let ciphertext = &packet[12..nonce_off];
-        let cipher = XSalsa20Poly1305::new(secret_key.into());
-        let plaintext = cipher
-            .decrypt(&nonce_bytes.into(), ciphertext)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("xsalsa20poly1305 decrypt: {e}"),
-                )
-            })?;
+        let plaintext = match mode {
+            CipherMode::Aes256GcmRtpSize => {
+                let cipher = Aes256Gcm::new(secret_key.into());
+                cipher
+                    .decrypt(
+                        Nonce::from_slice(&nonce_bytes),
+                        Payload { msg: ciphertext, aad: &header_bytes },
+                    )
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("aes256-gcm decrypt: {e}"),
+                        )
+                    })?
+            }
+            CipherMode::XChaCha20RtpSize => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "aead_xchacha20_poly1305_rtpsize: not implemented",
+                ));
+            }
+        };
         Ok((header, plaintext))
     }
 
@@ -1039,9 +1086,17 @@ mod rtp {
             let header = rtp_header(42, 9600, 0xDEADBEEF);
             let payload = b"a fake opus frame";
             let mut counter: u32 = 1;
-            let packet = encrypt_packet(&header, payload, &key, &mut counter).unwrap();
+            let packet = encrypt_packet(
+                &header,
+                payload,
+                &key,
+                &mut counter,
+                CipherMode::Aes256GcmRtpSize,
+            )
+            .unwrap();
             assert_eq!(counter, 2);
-            let (h, decoded) = decrypt_packet(&packet, &key).unwrap();
+            let (h, decoded) =
+                decrypt_packet(&packet, &key, CipherMode::Aes256GcmRtpSize).unwrap();
             assert_eq!(h.seq, 42);
             assert_eq!(h.timestamp, 9600);
             assert_eq!(h.ssrc, 0xDEADBEEF);
@@ -1052,7 +1107,22 @@ mod rtp {
         fn decrypt_rejects_short_packet() {
             let key = [0u8; 32];
             let too_short = [0u8; 12 + 16 + 3];
-            assert!(decrypt_packet(&too_short, &key).is_err());
+            assert!(decrypt_packet(&too_short, &key, CipherMode::Aes256GcmRtpSize).is_err());
+        }
+
+        #[test]
+        fn xchacha_returns_unsupported() {
+            let key = [0u8; 32];
+            let header = rtp_header(0, 0, 0);
+            let mut counter: u32 = 0;
+            assert!(encrypt_packet(
+                &header,
+                b"",
+                &key,
+                &mut counter,
+                CipherMode::XChaCha20RtpSize
+            )
+            .is_err());
         }
     }
 }
@@ -1706,10 +1776,39 @@ mod session {
         let discovered = rtp::ip_discovery(&host, port, handshake.ssrc).await?;
 
         // 6. SELECT_PROTOCOL.
-        let mode = ready_state.modes.iter().find(|m| m.as_str() == "xsalsa20_poly1305_lite")
+        //
+        // Discord's modern READY only advertises aead_aes256_gcm_rtpsize
+        // and aead_xchacha20_poly1305_rtpsize. Prefer aes-gcm (which we
+        // implement); fall back to xchacha if Discord ever drops it
+        // (placeholder — encrypt path will return Unsupported until we
+        // wire a real chacha impl).
+        let mode = ready_state
+            .modes
+            .iter()
+            .find(|m| m.as_str() == "aead_aes256_gcm_rtpsize")
             .cloned()
-            .or_else(|| ready_state.modes.iter().find(|m| m.as_str() == "xsalsa20_poly1305").cloned())
-            .unwrap_or_else(|| "xsalsa20_poly1305_lite".to_string());
+            .or_else(|| {
+                ready_state
+                    .modes
+                    .iter()
+                    .find(|m| m.as_str() == "aead_xchacha20_poly1305_rtpsize")
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                        "voice gateway READY offered no supported encryption modes: {:?}",
+                        ready_state.modes
+                    ),
+                )
+            })?;
+        let cipher_mode = rtp::CipherMode::from_str(&mode).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("unrecognized encryption mode: {mode}"),
+            )
+        })?;
         let select = SelectProtocol {
             protocol: "udp",
             data: SelectProtocolData {
@@ -1779,12 +1878,14 @@ mod session {
             Arc::clone(&socket),
             Arc::clone(&secret),
             handshake.ssrc,
+            cipher_mode,
             say_rx,
             cancel_tx.clone(),
         );
         spawn_inbound_loop(
             Arc::clone(&socket),
             Arc::clone(&secret),
+            cipher_mode,
             channel_id,
             cancel_tx.clone(),
         );
@@ -1819,6 +1920,7 @@ mod session {
         socket: Arc<UdpSocket>,
         secret: Arc<[u8; 32]>,
         ssrc: u32,
+        cipher_mode: rtp::CipherMode,
         mut say_rx: mpsc::UnboundedReceiver<String>,
         cancel_signal: mpsc::Sender<()>,
     ) {
@@ -1858,7 +1960,7 @@ mod session {
                         padded.resize(codec::FRAME_SAMPLES_TOTAL, 0.0);
                         if let Err(e) = send_one_frame(
                             &socket, &secret, ssrc, &mut seq, &mut ts,
-                            &mut nonce_counter, &mut encoder, &padded,
+                            &mut nonce_counter, cipher_mode, &mut encoder, &padded,
                         ).await {
                             eprintln!("voice: outbound send failed: {e}");
                             let _ = cancel_signal.send(()).await;
@@ -1866,7 +1968,7 @@ mod session {
                         }
                     } else if let Err(e) = send_one_frame(
                         &socket, &secret, ssrc, &mut seq, &mut ts,
-                        &mut nonce_counter, &mut encoder, chunk,
+                        &mut nonce_counter, cipher_mode, &mut encoder, chunk,
                     ).await {
                         eprintln!("voice: outbound send failed: {e}");
                         let _ = cancel_signal.send(()).await;
@@ -1885,12 +1987,13 @@ mod session {
         seq: &mut u16,
         ts: &mut u32,
         nonce_counter: &mut u32,
+        cipher_mode: rtp::CipherMode,
         encoder: &mut codec::Encoder,
         pcm: &[f32],
     ) -> std::io::Result<()> {
         let opus = encoder.encode(pcm)?;
         let header = rtp::rtp_header(*seq, *ts, ssrc);
-        let packet = rtp::encrypt_packet(&header, &opus, secret, nonce_counter)?;
+        let packet = rtp::encrypt_packet(&header, &opus, secret, nonce_counter, cipher_mode)?;
         socket.send(&packet).await?;
         *seq = seq.wrapping_add(1);
         *ts = ts.wrapping_add(codec::FRAME_SAMPLES_PER_CHANNEL as u32);
@@ -1903,6 +2006,7 @@ mod session {
     fn spawn_inbound_loop(
         socket: Arc<UdpSocket>,
         secret: Arc<[u8; 32]>,
+        cipher_mode: rtp::CipherMode,
         channel_id: u64,
         cancel_signal: mpsc::Sender<()>,
     ) {
@@ -1927,7 +2031,7 @@ mod session {
                         return;
                     }
                 };
-                let (_hdr, opus) = match rtp::decrypt_packet(&buf[..n], &secret) {
+                let (_hdr, opus) = match rtp::decrypt_packet(&buf[..n], &secret, cipher_mode) {
                     Ok(t) => t,
                     Err(e) => {
                         // Discord injects keepalive / unknown packets
