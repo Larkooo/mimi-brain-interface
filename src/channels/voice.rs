@@ -308,11 +308,16 @@ mod gateway {
         DaveMlsInvalidCommitWelcome = 31,
     }
 
-    /// Build a binary voice-gateway frame: `[seq:u16 BE][op:u8][payload..]`.
-    /// Used for DAVE MLS opcodes 25-30 which are sent as Message::Binary.
-    pub fn build_binary_frame(seq: u16, op: u8, payload: &[u8]) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(3 + payload.len());
-        buf.extend_from_slice(&seq.to_be_bytes());
+    /// Build an outbound DAVE MLS binary frame: `[op:u8][payload..]`.
+    ///
+    /// Per the DAVE protocol spec, client→server opcodes (26 key_package,
+    /// 28 commit_welcome) carry NO `sequence_number` prefix. Only inbound
+    /// opcodes (25, 27, 29, 30) carry `uint16 sequence_number` ahead of
+    /// the opcode byte. Earlier impl prepended a `0u16` which made Discord
+    /// silently drop the frame and stalled the handshake before
+    /// SESSION_DESCRIPTION.
+    pub fn build_outbound_binary_frame(op: u8, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + payload.len());
         buf.push(op);
         buf.extend_from_slice(payload);
         buf
@@ -649,11 +654,12 @@ mod gateway {
                                         eprintln!("voice/dave: op 24 prepare_epoch: {}", frame.d);
                                         match dave_session.create_key_package() {
                                             Ok(kp) => {
-                                                let buf = build_binary_frame(0, 26, &kp);
+                                                let buf = build_outbound_binary_frame(26, &kp);
+                                                let frame_len = buf.len();
                                                 if sink.send(Message::Binary(buf.into())).await.is_err() {
                                                     break;
                                                 }
-                                                eprintln!("voice/dave: sent op 26 key_package ({} bytes)", kp.len());
+                                                eprintln!("voice/dave: sent op 26 key_package ({} bytes, frame={})", kp.len(), frame_len);
                                             }
                                             Err(e) => {
                                                 eprintln!("voice/dave: create_key_package failed: {e:?}");
@@ -727,14 +733,16 @@ mod gateway {
                                             if let Some(w) = &cw.welcome {
                                                 out.extend_from_slice(w);
                                             }
-                                            let buf = build_binary_frame(0, 28, &out);
+                                            let buf = build_outbound_binary_frame(28, &out);
+                                            let frame_len = buf.len();
                                             if sink.send(Message::Binary(buf.into())).await.is_err() {
                                                 break;
                                             }
                                             eprintln!(
-                                                "voice/dave: sent op 28 commit_welcome (commit={}, welcome={})",
+                                                "voice/dave: sent op 28 commit_welcome (commit={}, welcome={}, frame={})",
                                                 cw.commit.len(),
-                                                cw.welcome.as_ref().map_or(0, |w| w.len())
+                                                cw.welcome.as_ref().map_or(0, |w| w.len()),
+                                                frame_len
                                             );
                                         }
                                         Ok(None) => {
