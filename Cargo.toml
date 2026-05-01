@@ -31,8 +31,11 @@ base64 = "0.22"
 
 # Voice channel scaffold (feature/discord-voice). `audiopus` (libopus FFI,
 # needs `apt install libopus-dev autoconf automake libtool pkg-config`) is
-# pulled in for the codec wrapper; `xsalsa20poly1305` is pulled in for
-# the RTP encrypted-packet path (Discord voice uses xsalsa20_poly1305_lite).
+# pulled in for the codec wrapper; `aes-gcm` powers the RTP encrypted-packet
+# path (Discord voice has migrated off xsalsa20 — current modes are
+# `aead_aes256_gcm_rtpsize` and `aead_xchacha20_poly1305_rtpsize`; we
+# implement the former).
 rand = "0.9"
-xsalsa20poly1305 = "0.9"
+aes-gcm = "0.10"
 audiopus = "0.2"
+davey = "0.1.3"

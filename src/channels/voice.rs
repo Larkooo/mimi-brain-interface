@@ -18,9 +18,10 @@
 //!                    event). Handles HELLO/IDENTIFY/SELECT_PROTOCOL/READY,
 //!                    plus the heartbeat keepalive. Hands the UDP endpoint
 //!                    + secret_key to the RTP layer.
-//!   2. `rtp`       — UDP socket. Sends 20ms opus frames wrapped in RTP+
-//!                    xsalsa20poly1305 encryption. Reads inbound RTP, keeps
-//!                    per-SSRC streams, and demuxes them back to the caller.
+//!   2. `rtp`       — UDP socket. Sends 20ms opus frames wrapped in RTP +
+//!                    AEAD (aead_aes256_gcm_rtpsize) encryption. Reads
+//!                    inbound RTP, keeps per-SSRC streams, and demuxes
+//!                    them back to the caller.
 //!   3. `codec`     — thin wrapper around `audiopus` for stereo 48kHz opus.
 //!   4. `tts`       — provider client (initially OpenAI TTS via REST,
 //!                    HTTP/2 stream into the encoder). Pluggable trait so
@@ -290,6 +291,43 @@ mod gateway {
         Hello = 8,
         Resumed = 9,
         ClientDisconnect = 13,
+
+        // DAVE protocol (E2EE). Mandatory once `max_dave_protocol_version: 1`
+        // is advertised in IDENTIFY. JSON ops 21-24, 31; binary ops 25-30.
+        // Spec: https://daveprotocol.com / https://github.com/discord/dave-protocol
+        DavePrepareTransition = 21,
+        DaveExecuteTransition = 22,
+        DaveReadyForTransition = 23,
+        DavePrepareEpoch = 24,
+        DaveMlsExternalSenderPackage = 25,
+        DaveMlsKeyPackage = 26,
+        DaveMlsProposals = 27,
+        DaveMlsCommitWelcome = 28,
+        DaveMlsAnnounceCommitTransition = 29,
+        DaveMlsWelcome = 30,
+        DaveMlsInvalidCommitWelcome = 31,
+    }
+
+    /// Build a binary voice-gateway frame: `[seq:u16 BE][op:u8][payload..]`.
+    /// Used for DAVE MLS opcodes 25-30 which are sent as Message::Binary.
+    pub fn build_binary_frame(seq: u16, op: u8, payload: &[u8]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(3 + payload.len());
+        buf.extend_from_slice(&seq.to_be_bytes());
+        buf.push(op);
+        buf.extend_from_slice(payload);
+        buf
+    }
+
+    /// Parse the header off an inbound binary voice-gateway frame.
+    /// Returns (seq, op, payload). Errors if the frame is shorter than 3 bytes.
+    pub fn parse_binary_frame(b: &[u8]) -> Option<(u16, u8, &[u8])> {
+        if b.len() < 3 {
+            return None;
+        }
+        let seq = u16::from_be_bytes([b[0], b[1]]);
+        let op = b[2];
+        let payload = &b[3..];
+        Some((seq, op, payload))
     }
 
     /// Wire envelope for every voice gateway message. Discord uses `op` +
@@ -319,6 +357,10 @@ mod gateway {
         pub user_id: String,
         pub session_id: String,
         pub token: String,
+        // Opt out of DAVE (E2EE). Discord enforces DAVE on v=8+ unless
+        // we advertise 0 here. Without this we get a 4017 close on
+        // IDENTIFY ("E2EE/DAVE protocol required").
+        pub max_dave_protocol_version: u8,
     }
 
     /// READY (op 2). Discord answers with the UDP endpoint we should bind
@@ -343,11 +385,11 @@ mod gateway {
     pub struct SelectProtocolData {
         pub address: String,
         pub port: u16,
-        pub mode: &'static str, // "xsalsa20_poly1305" for now
+        pub mode: &'static str, // e.g. "aead_aes256_gcm_rtpsize"
     }
 
     /// SESSION_DESCRIPTION (op 4). Final handshake step: the 32-byte
-    /// secret_key the RTP layer uses for xsalsa20poly1305 encryption.
+    /// secret_key the RTP layer uses for AEAD encryption.
     #[derive(Debug, Clone, Deserialize)]
     pub struct SessionDescription {
         pub mode: String,
@@ -418,13 +460,38 @@ mod gateway {
         endpoint: &str,
         guild_id: u64,
         user_id: u64,
+        channel_id: u64,
         session_id: &str,
         token: &str,
     ) -> std::io::Result<(Handshake, ReadyState)> {
+        // Construct a DAVE session up front — we'll move it into the WS
+        // task post-READY. user_id + channel_id snowflakes scope the MLS
+        // group; the session itself is INACTIVE until the gateway sends
+        // op 24 (prepare_epoch) + op 25 (external_sender_package), at which
+        // point we generate a key package and respond with op 26.
+        let dave_version = std::num::NonZeroU16::new(davey::DAVE_PROTOCOL_VERSION)
+            .expect("DAVE_PROTOCOL_VERSION non-zero");
+        let mut dave_session = davey::DaveSession::new(
+            dave_version, user_id, channel_id, None,
+        ).map_err(|e| std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("DaveSession::new: {e:?}"),
+        ))?;
+        eprintln!(
+            "voice/dave: DaveSession ready (v={}, user={user_id}, channel={channel_id})",
+            davey::DAVE_PROTOCOL_VERSION
+        );
+        // v=8 is the DAVE-aware voice gateway. We advertise
+        // max_dave_protocol_version=1 in IDENTIFY and handle ops 21-31
+        // in the WS task below; the gateway pushes external_sender_package
+        // (op 25), prepare_epoch (op 24), proposals (op 27), commits
+        // (op 29), and welcomes (op 30) which we route into davey.
         let url = format!("wss://{}/?v=8", endpoint);
+        eprintln!("voice/gateway: connecting url={url} guild={guild_id} user={user_id} session={session_id} token_len={}", token.len());
         let (ws, _resp) = connect_async(&url).await.map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e.to_string())
         })?;
+        eprintln!("voice/gateway: ws connected, awaiting HELLO");
         let (mut sink, mut stream) = ws.split();
 
         // 1. Receive HELLO. Anything else here is a protocol violation.
@@ -455,35 +522,50 @@ mod gateway {
                 user_id: user_id.to_string(),
                 session_id: session_id.to_string(),
                 token: token.to_string(),
+                max_dave_protocol_version: 1,
             })
             .map_err(io_err)?,
             seq: None,
         };
-        sink.send(Message::Text(
-            serde_json::to_string(&identify).map_err(io_err)?.into(),
-        ))
+        let identify_json = serde_json::to_string(&identify).map_err(io_err)?;
+        eprintln!("voice/gateway: sending IDENTIFY: {identify_json}");
+        sink.send(Message::Text(identify_json.into()))
         .await
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::BrokenPipe, e.to_string()))?;
+        eprintln!("voice/gateway: IDENTIFY sent, awaiting READY");
 
         // 3. Receive READY (Discord may interleave a HEARTBEAT_ACK or
         //    HELLO-echo, so we loop until we see op 2).
         let ready: Ready = loop {
             match stream.next().await {
                 Some(Ok(Message::Text(txt))) => {
+                    eprintln!("voice/gateway: pre-READY frame: {txt}");
                     let frame: Frame = serde_json::from_str(&txt).map_err(io_err)?;
                     if frame.op == Op::Ready as u8 {
                         break serde_json::from_value(frame.d).map_err(io_err)?;
                     }
                     // Unhandled pre-READY frame — log and continue.
                 }
-                Some(Ok(_)) => continue,
+                Some(Ok(Message::Close(cf))) => {
+                    eprintln!("voice/gateway: ws CLOSE frame: {cf:?}");
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::ConnectionAborted,
+                        format!("voice ws close: {cf:?}"),
+                    ));
+                }
+                Some(Ok(other)) => {
+                    eprintln!("voice/gateway: pre-READY non-text frame: {other:?}");
+                    continue;
+                }
                 Some(Err(e)) => {
+                    eprintln!("voice/gateway: ws stream error: {e}");
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         e.to_string(),
                     ));
                 }
                 None => {
+                    eprintln!("voice/gateway: ws stream ended (None)");
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::ConnectionAborted,
                         "voice ws closed before READY",
@@ -534,9 +616,212 @@ mod gateway {
                         Some(Ok(Message::Close(_))) | None => break,
                         Some(Ok(Message::Text(txt))) => {
                             if let Ok(frame) = serde_json::from_str::<Frame>(&txt) {
-                                // If nobody's listening (session dropped
-                                // its receiver), bail.
-                                if in_tx.send(frame).is_err() { break; }
+                                // DAVE JSON ops (21/22/23/24/31) handled
+                                // here pre-channel-forward.
+                                match frame.op {
+                                    21 => {
+                                        // dave_protocol_prepare_transition:
+                                        // {protocol_version, transition_id}.
+                                        // transition_id=0 means reset MLS state.
+                                        if let Some(tid) = frame.d.get("transition_id").and_then(|v| v.as_u64()) {
+                                            if tid == 0 {
+                                                if let Err(e) = dave_session.reset() {
+                                                    eprintln!("voice/dave: reset failed: {e:?}");
+                                                }
+                                                eprintln!("voice/dave: op 21 prepare_transition tid=0, reset");
+                                            } else {
+                                                eprintln!("voice/dave: op 21 prepare_transition tid={tid}");
+                                            }
+                                        }
+                                    }
+                                    22 => {
+                                        // dave_protocol_execute_transition:
+                                        // server signals it's safe to switch
+                                        // ratchets. davey's encryptor handles
+                                        // the active flag internally; just log.
+                                        eprintln!("voice/dave: op 22 execute_transition: {}", frame.d);
+                                    }
+                                    24 => {
+                                        // dave_protocol_prepare_epoch:
+                                        // {protocol_version, epoch}. The next
+                                        // step is to generate + send our
+                                        // key package as op 26 binary.
+                                        eprintln!("voice/dave: op 24 prepare_epoch: {}", frame.d);
+                                        match dave_session.create_key_package() {
+                                            Ok(kp) => {
+                                                let buf = build_binary_frame(0, 26, &kp);
+                                                if sink.send(Message::Binary(buf.into())).await.is_err() {
+                                                    break;
+                                                }
+                                                eprintln!("voice/dave: sent op 26 key_package ({} bytes)", kp.len());
+                                            }
+                                            Err(e) => {
+                                                eprintln!("voice/dave: create_key_package failed: {e:?}");
+                                            }
+                                        }
+                                    }
+                                    31 => {
+                                        eprintln!("voice/dave: op 31 invalid_commit_welcome: {}", frame.d);
+                                    }
+                                    _ => {
+                                        // Non-DAVE text frame — forward to
+                                        // session layer (SESSION_DESCRIPTION,
+                                        // peer SPEAKING, CLIENT_DISCONNECT, etc).
+                                        if in_tx.send(frame).is_err() { break; }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Binary(b))) => {
+                            // DAVE MLS opcodes 25-30 arrive as binary frames
+                            // with the layout `[seq:u16 BE][op:u8][payload..]`.
+                            let Some((seq, op, payload)) = parse_binary_frame(&b) else {
+                                eprintln!(
+                                    "voice/gateway: short binary frame ({} bytes), ignoring",
+                                    b.len()
+                                );
+                                continue;
+                            };
+                            eprintln!(
+                                "voice/gateway: binary frame seq={seq} op={op} payload_len={}",
+                                payload.len()
+                            );
+                            match op {
+                                25 => {
+                                    // dave_mls_external_sender_package:
+                                    // ExternalSender bytes. Set on the
+                                    // session — this also resets any
+                                    // pre-existing group to a pending one.
+                                    if let Err(e) = dave_session.set_external_sender(payload) {
+                                        eprintln!("voice/dave: set_external_sender failed: {e:?}");
+                                    } else {
+                                        eprintln!("voice/dave: external sender set");
+                                    }
+                                }
+                                27 => {
+                                    // dave_mls_proposals: first byte is the
+                                    // ProposalsOperationType (0=APPEND,
+                                    // 1=REVOKE), rest is the VLBytes-wrapped
+                                    // proposal stream.
+                                    if payload.is_empty() {
+                                        eprintln!("voice/dave: op 27 empty payload");
+                                        continue;
+                                    }
+                                    let optype = match payload[0] {
+                                        0 => davey::ProposalsOperationType::APPEND,
+                                        1 => davey::ProposalsOperationType::REVOKE,
+                                        b => {
+                                            eprintln!("voice/dave: op 27 unknown optype {b}");
+                                            continue;
+                                        }
+                                    };
+                                    match dave_session.process_proposals(optype, &payload[1..], None) {
+                                        Ok(Some(cw)) => {
+                                            // Build op 28 commit_welcome:
+                                            // commit bytes followed by
+                                            // optional welcome bytes.
+                                            let mut out = Vec::with_capacity(
+                                                cw.commit.len() + cw.welcome.as_ref().map_or(0, |w| w.len())
+                                            );
+                                            out.extend_from_slice(&cw.commit);
+                                            if let Some(w) = &cw.welcome {
+                                                out.extend_from_slice(w);
+                                            }
+                                            let buf = build_binary_frame(0, 28, &out);
+                                            if sink.send(Message::Binary(buf.into())).await.is_err() {
+                                                break;
+                                            }
+                                            eprintln!(
+                                                "voice/dave: sent op 28 commit_welcome (commit={}, welcome={})",
+                                                cw.commit.len(),
+                                                cw.welcome.as_ref().map_or(0, |w| w.len())
+                                            );
+                                        }
+                                        Ok(None) => {
+                                            eprintln!("voice/dave: op 27 no commit needed");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_proposals failed: {e:?}");
+                                        }
+                                    }
+                                }
+                                29 => {
+                                    // dave_mls_announce_commit_transition:
+                                    // [transition_id:u16 BE][commit bytes..]
+                                    if payload.len() < 2 {
+                                        eprintln!("voice/dave: op 29 short payload");
+                                        continue;
+                                    }
+                                    let tid = u16::from_be_bytes([payload[0], payload[1]]);
+                                    let commit_bytes = &payload[2..];
+                                    match dave_session.process_commit(commit_bytes) {
+                                        Ok(_) => {
+                                            // Reply with op 23 ready_for_transition.
+                                            let f = Frame {
+                                                op: 23,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                if sink.send(Message::Text(s.into())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            eprintln!("voice/dave: applied commit, sent op 23 tid={tid}");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_commit failed: {e:?}");
+                                            // Send op 31 invalid_commit_welcome.
+                                            let f = Frame {
+                                                op: 31,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                let _ = sink.send(Message::Text(s.into())).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                30 => {
+                                    // dave_mls_welcome:
+                                    // [transition_id:u16 BE][welcome bytes..]
+                                    if payload.len() < 2 {
+                                        eprintln!("voice/dave: op 30 short payload");
+                                        continue;
+                                    }
+                                    let tid = u16::from_be_bytes([payload[0], payload[1]]);
+                                    let welcome_bytes = &payload[2..];
+                                    match dave_session.process_welcome(welcome_bytes) {
+                                        Ok(_) => {
+                                            let f = Frame {
+                                                op: 23,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                if sink.send(Message::Text(s.into())).await.is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            eprintln!("voice/dave: applied welcome, sent op 23 tid={tid}");
+                                        }
+                                        Err(e) => {
+                                            eprintln!("voice/dave: process_welcome failed: {e:?}");
+                                            let f = Frame {
+                                                op: 31,
+                                                d: serde_json::json!({"transition_id": tid}),
+                                                seq: None,
+                                            };
+                                            if let Ok(s) = serde_json::to_string(&f) {
+                                                let _ = sink.send(Message::Text(s.into())).await;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    eprintln!("voice/dave: unhandled binary op {op}");
+                                }
                             }
                         }
                         _ => {}
@@ -569,13 +854,9 @@ mod gateway {
 
 mod rtp {
     //! UDP RTP send/receive. 20ms opus frames, sequence + timestamp
-    //! bookkeeping, xsalsa20poly1305 encryption with the secret_key from
-    //! the gateway. Inbound: per-SSRC demux into separate audio streams.
-    //!
-    //! Status this commit: UDP socket bind + IP discovery (the 74-byte
-    //! handshake Discord uses to tell the bot what its public-facing
-    //! ip:port is). Encrypted RTP send/receive lands once xsalsa20poly1305
-    //! is added to Cargo.toml.
+    //! bookkeeping, AEAD encryption (aead_aes256_gcm_rtpsize) with the
+    //! secret_key from the gateway. Inbound: per-SSRC demux into separate
+    //! audio streams.
 
     use tokio::net::UdpSocket;
 
@@ -646,9 +927,9 @@ mod rtp {
         h
     }
 
-    use xsalsa20poly1305::{
-        aead::{Aead, KeyInit},
-        XSalsa20Poly1305,
+    use aes_gcm::{
+        Aes256Gcm, Nonce,
+        aead::{Aead, KeyInit, Payload},
     };
 
     /// Parsed RTP header fields for inbound frames. Discord uses fixed
@@ -661,54 +942,90 @@ mod rtp {
         pub ssrc: u32,
     }
 
-    /// Encrypt one outbound voice packet using `xsalsa20_poly1305_lite`.
+    /// Negotiated voice encryption mode. Discord's READY frame advertises
+    /// the strings; we map those to this enum at handshake time so the hot
+    /// path doesn't re-parse on every packet.
     ///
-    /// Wire format on the UDP socket:
+    /// Currently only `Aes256GcmRtpSize` is implemented — `XChaCha20RtpSize`
+    /// is left as a placeholder so the SELECT_PROTOCOL path can fall back
+    /// gracefully if Discord ever drops aes-gcm.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum CipherMode {
+        Aes256GcmRtpSize,
+        XChaCha20RtpSize,
+    }
+
+    impl CipherMode {
+        pub fn from_str(s: &str) -> Option<Self> {
+            match s {
+                "aead_aes256_gcm_rtpsize" => Some(Self::Aes256GcmRtpSize),
+                "aead_xchacha20_poly1305_rtpsize" => Some(Self::XChaCha20RtpSize),
+                _ => None,
+            }
+        }
+    }
+
+    /// Encrypt one outbound voice packet under the negotiated AEAD mode.
     ///
-    ///   `[ rtp_header (12 bytes) | xsalsa20poly1305(opus_frame) | nonce_counter (4 bytes BE) ]`
+    /// Wire format on the UDP socket (both `aead_*_rtpsize` modes share it):
     ///
-    /// The 24-byte XSalsa20 nonce is `nonce_counter (4 bytes BE) || zeros (20)` —
-    /// Discord's _lite variant. The counter MUST monotonically increase
-    /// across packets; the caller owns it and bumps after each call.
-    /// (Discord docs: <https://discord.com/developers/docs/topics/voice-connections#encrypting-and-sending-voice>)
+    ///   `[ rtp_header (12 bytes) | ciphertext | tag (16 bytes) | nonce_counter (4 bytes BE) ]`
+    ///
+    /// AAD is the unencrypted RTP header. The 4-byte nonce counter is
+    /// extended to a 12-byte AEAD nonce by prepending 8 zero bytes
+    /// (`nonce96 = [0u8;8] || nonce32_be`). The counter MUST monotonically
+    /// increase across packets; the caller owns it and bumps after each call.
+    /// (Discord docs: <https://discord.com/developers/docs/topics/voice-connections#transport-encryption-modes>)
     pub fn encrypt_packet(
         header: &[u8; 12],
         opus_frame: &[u8],
         secret_key: &[u8; 32],
         nonce_counter: &mut u32,
+        mode: CipherMode,
     ) -> std::io::Result<Vec<u8>> {
-        let cipher = XSalsa20Poly1305::new(secret_key.into());
-        let mut nonce_bytes = [0u8; 24];
-        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
-        let ciphertext = cipher
-            .encrypt(&nonce_bytes.into(), opus_frame)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("xsalsa20poly1305 encrypt: {e}"),
-                )
-            })?;
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[8..12].copy_from_slice(&nonce_counter.to_be_bytes());
+        let ciphertext = match mode {
+            CipherMode::Aes256GcmRtpSize => {
+                let cipher = Aes256Gcm::new(secret_key.into());
+                cipher
+                    .encrypt(
+                        Nonce::from_slice(&nonce_bytes),
+                        Payload { msg: opus_frame, aad: header },
+                    )
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("aes256-gcm encrypt: {e}"),
+                        )
+                    })?
+            }
+            CipherMode::XChaCha20RtpSize => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "aead_xchacha20_poly1305_rtpsize: not implemented",
+                ));
+            }
+        };
         let mut out = Vec::with_capacity(12 + ciphertext.len() + 4);
         out.extend_from_slice(header);
         out.extend_from_slice(&ciphertext);
-        // Append the nonce counter so the receiver can derive the same
-        // 24-byte nonce. Per Discord _lite spec.
         out.extend_from_slice(&nonce_counter.to_be_bytes());
         *nonce_counter = nonce_counter.wrapping_add(1);
         Ok(out)
     }
 
-    /// Decrypt one inbound voice packet (xsalsa20_poly1305_lite). Mirrors
-    /// `encrypt_packet`: pulls the trailing 4-byte nonce counter, builds
-    /// the 24-byte nonce, and returns the raw opus payload along with the
-    /// parsed RTP header.
+    /// Decrypt one inbound voice packet under the negotiated AEAD mode.
+    /// Mirrors `encrypt_packet`: split off the trailing 4-byte nonce counter,
+    /// reconstruct the 96-bit nonce, AEAD-verify with the 12-byte RTP header
+    /// as AAD.
     ///
     /// Returns `InvalidData` if the packet is shorter than the minimum
-    /// (`12 header + 16 poly1305 tag + 4 nonce_counter`) or if AEAD verify
-    /// fails.
+    /// (`12 header + 16 tag + 4 nonce_counter`) or if AEAD verify fails.
     pub fn decrypt_packet(
         packet: &[u8],
         secret_key: &[u8; 32],
+        mode: CipherMode,
     ) -> std::io::Result<(RtpHeader, Vec<u8>)> {
         const MIN: usize = 12 + 16 + 4;
         if packet.len() < MIN {
@@ -717,6 +1034,7 @@ mod rtp {
                 format!("rtp packet too short: {} < {}", packet.len(), MIN),
             ));
         }
+        let header_bytes: [u8; 12] = packet[..12].try_into().unwrap();
         let header = RtpHeader {
             seq: u16::from_be_bytes([packet[2], packet[3]]),
             timestamp: u32::from_be_bytes([packet[4], packet[5], packet[6], packet[7]]),
@@ -729,19 +1047,32 @@ mod rtp {
             packet[nonce_off + 2],
             packet[nonce_off + 3],
         ]);
-        let mut nonce_bytes = [0u8; 24];
-        nonce_bytes[0..4].copy_from_slice(&nonce_counter.to_be_bytes());
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[8..12].copy_from_slice(&nonce_counter.to_be_bytes());
 
         let ciphertext = &packet[12..nonce_off];
-        let cipher = XSalsa20Poly1305::new(secret_key.into());
-        let plaintext = cipher
-            .decrypt(&nonce_bytes.into(), ciphertext)
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("xsalsa20poly1305 decrypt: {e}"),
-                )
-            })?;
+        let plaintext = match mode {
+            CipherMode::Aes256GcmRtpSize => {
+                let cipher = Aes256Gcm::new(secret_key.into());
+                cipher
+                    .decrypt(
+                        Nonce::from_slice(&nonce_bytes),
+                        Payload { msg: ciphertext, aad: &header_bytes },
+                    )
+                    .map_err(|e| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            format!("aes256-gcm decrypt: {e}"),
+                        )
+                    })?
+            }
+            CipherMode::XChaCha20RtpSize => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    "aead_xchacha20_poly1305_rtpsize: not implemented",
+                ));
+            }
+        };
         Ok((header, plaintext))
     }
 
@@ -755,9 +1086,17 @@ mod rtp {
             let header = rtp_header(42, 9600, 0xDEADBEEF);
             let payload = b"a fake opus frame";
             let mut counter: u32 = 1;
-            let packet = encrypt_packet(&header, payload, &key, &mut counter).unwrap();
+            let packet = encrypt_packet(
+                &header,
+                payload,
+                &key,
+                &mut counter,
+                CipherMode::Aes256GcmRtpSize,
+            )
+            .unwrap();
             assert_eq!(counter, 2);
-            let (h, decoded) = decrypt_packet(&packet, &key).unwrap();
+            let (h, decoded) =
+                decrypt_packet(&packet, &key, CipherMode::Aes256GcmRtpSize).unwrap();
             assert_eq!(h.seq, 42);
             assert_eq!(h.timestamp, 9600);
             assert_eq!(h.ssrc, 0xDEADBEEF);
@@ -768,7 +1107,22 @@ mod rtp {
         fn decrypt_rejects_short_packet() {
             let key = [0u8; 32];
             let too_short = [0u8; 12 + 16 + 3];
-            assert!(decrypt_packet(&too_short, &key).is_err());
+            assert!(decrypt_packet(&too_short, &key, CipherMode::Aes256GcmRtpSize).is_err());
+        }
+
+        #[test]
+        fn xchacha_returns_unsupported() {
+            let key = [0u8; 32];
+            let header = rtp_header(0, 0, 0);
+            let mut counter: u32 = 0;
+            assert!(encrypt_packet(
+                &header,
+                b"",
+                &key,
+                &mut counter,
+                CipherMode::XChaCha20RtpSize
+            )
+            .is_err());
         }
     }
 }
@@ -889,106 +1243,80 @@ mod codec {
 }
 
 mod tts {
-    //! TTS provider abstraction. Initial impl: OpenAI TTS REST. Returns
-    //! a stream of 48kHz f32 samples for the encoder to chunk.
+    //! TTS provider abstraction. Free-tier impl: Microsoft Edge `edge-tts`
+    //! via Python subprocess (no API key needed). Pipeline:
+    //! `edge-tts -> mp3 -> ffmpeg -> raw f32le PCM @ 48kHz mono` on stdout.
     //!
-    //! API key resolution order:
-    //!   1. `OPENAI_API_KEY` env var (set on the systemd unit or shell)
-    //!   2. `~/.mimi/accounts/openai.json` with `{"api_key": "sk-..."}`
+    //! Env knobs:
+    //!   - `MIMI_TTS_PYTHON`  python interpreter (defaults to the repo venv)
+    //!   - `MIMI_TTS_SCRIPT`  helper script path (defaults to scripts/tts_edge.py)
+    //!   - `MIMI_TTS_VOICE`   edge-tts voice id (default fr-FR-HenriNeural)
+    //!   - `MIMI_TTS_RATE`    edge-tts rate (default +0%)
     //!
-    //! OWNER ACTION REQUIRED if neither is present — `tts::synthesize`
-    //! will return an error at runtime. Drop a key into either location
-    //! and the voice session will pick it up on the next call.
+    //! All resolution is best-effort relative to `$HOME/mimi-brain-interface/`
+    //! so a default systemd deployment "just works".
 
-    use serde::{Deserialize, Serialize};
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
 
-    const OPENAI_TTS_URL: &str = "https://api.openai.com/v1/audio/speech";
-    /// OpenAI TTS supports `pcm` response format: signed-16-bit, 24kHz,
-    /// mono, little-endian. We resample to 48kHz here so the encoder
-    /// gets the canonical Discord rate.
-    const OPENAI_TTS_RATE_HZ: u32 = 24_000;
-    const TARGET_RATE_HZ: u32 = 48_000;
-
-    #[derive(Serialize)]
-    struct TtsRequest<'a> {
-        model: &'a str,
-        input: &'a str,
-        voice: &'a str,
-        response_format: &'a str,
-    }
-
-    #[derive(Deserialize)]
-    struct OpenAiKeyFile {
-        api_key: String,
-    }
-
-    fn load_api_key() -> std::io::Result<String> {
-        if let Ok(k) = std::env::var("OPENAI_API_KEY") {
-            if !k.is_empty() { return Ok(k); }
-        }
-        let path = dirs::home_dir()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?
-            .join(".mimi/accounts/openai.json");
-        let body = std::fs::read_to_string(&path).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "OPENAI_API_KEY env var unset and {} not readable: {e}",
-                    path.display()
-                ),
-            )
-        })?;
-        let parsed: OpenAiKeyFile = serde_json::from_str(&body).map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("openai.json parse: {e}"),
-            )
-        })?;
-        Ok(parsed.api_key)
-    }
-
-    /// Synthesize `text` via OpenAI TTS and return 48kHz mono f32 PCM.
-    /// The opus encoder expects stereo, so the caller duplicates the
-    /// channel before encoding (cheap; saves a TTS round-trip on a
-    /// stereo voice that nobody can hear the difference on).
     pub async fn synthesize(text: &str) -> std::io::Result<Vec<f32>> {
-        let key = load_api_key()?;
-        let req = TtsRequest {
-            model: "tts-1",       // low-latency tier; tts-1-hd if quality > speed
-            input: text,
-            voice: "alloy",       // sane neutral default; switchable later
-            response_format: "pcm",
-        };
-        let client = reqwest::Client::new();
-        let resp = client
-            .post(OPENAI_TTS_URL)
-            .bearer_auth(&key)
-            .json(&req)
-            .send()
-            .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("tts http: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
+        let home = dirs::home_dir()
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home"))?;
+        let python = std::env::var("MIMI_TTS_PYTHON").unwrap_or_else(|_| {
+            home.join("mimi-brain-interface/.venv/bin/python")
+                .to_string_lossy()
+                .into_owned()
+        });
+        let script = std::env::var("MIMI_TTS_SCRIPT").unwrap_or_else(|_| {
+            home.join("mimi-brain-interface/scripts/tts_edge.py")
+                .to_string_lossy()
+                .into_owned()
+        });
+
+        let mut child = Command::new(python)
+            .arg(script)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("tts spawn: {e}")))?;
+
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes()).await.map_err(|e| {
+                std::io::Error::new(std::io::ErrorKind::Other, format!("tts stdin: {e}"))
+            })?;
+            // Drop closes stdin -> EOF for the child.
+        }
+
+        let out = child.wait_with_output().await.map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::Other, format!("tts wait: {e}"))
+        })?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("openai tts http {status}: {body}"),
+                format!("tts_edge exit={}: {}", out.status, stderr),
             ));
         }
-        let bytes = resp.bytes().await.map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::Other, format!("tts read: {e}"))
-        })?;
-        // OpenAI returns signed-16 LE PCM mono @ 24kHz.
-        let mut pcm24: Vec<f32> = Vec::with_capacity(bytes.len() / 2);
-        for chunk in bytes.chunks_exact(2) {
-            let s = i16::from_le_bytes([chunk[0], chunk[1]]);
-            pcm24.push(s as f32 / 32768.0);
+
+        // Already 48kHz f32 LE mono — just transmute bytes -> f32 little-endian.
+        let bytes = out.stdout;
+        if bytes.len() % 4 != 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("tts pcm not f32-aligned: {} bytes", bytes.len()),
+            ));
         }
-        Ok(linear_resample(&pcm24, OPENAI_TTS_RATE_HZ, TARGET_RATE_HZ))
+        let mut pcm: Vec<f32> = Vec::with_capacity(bytes.len() / 4);
+        for chunk in bytes.chunks_exact(4) {
+            pcm.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(pcm)
     }
 
-    /// Trivial linear interpolation resampler. Good enough for speech;
-    /// if we ever care about quality, swap for `dasp_signal` or libsamplerate.
+    /// Trivial linear interpolation resampler. Kept for potential future
+    /// providers that don't emit at the canonical 48 kHz rate.
+    #[allow(dead_code)]
     fn linear_resample(input: &[f32], from_hz: u32, to_hz: u32) -> Vec<f32> {
         if from_hz == to_hz || input.is_empty() {
             return input.to_vec();
@@ -1440,7 +1768,7 @@ mod session {
 
         // 4. Voice gateway IDENTIFY → READY.
         let (mut handshake, ready_state) = gateway::connect(
-            &endpoint, guild_id, user_id, &session_id, &voice_token,
+            &endpoint, guild_id, user_id, channel_id, &session_id, &voice_token,
         ).await?;
 
         // 5. UDP IP-discovery.
@@ -1448,10 +1776,39 @@ mod session {
         let discovered = rtp::ip_discovery(&host, port, handshake.ssrc).await?;
 
         // 6. SELECT_PROTOCOL.
-        let mode = ready_state.modes.iter().find(|m| m.as_str() == "xsalsa20_poly1305_lite")
+        //
+        // Discord's modern READY only advertises aead_aes256_gcm_rtpsize
+        // and aead_xchacha20_poly1305_rtpsize. Prefer aes-gcm (which we
+        // implement); fall back to xchacha if Discord ever drops it
+        // (placeholder — encrypt path will return Unsupported until we
+        // wire a real chacha impl).
+        let mode = ready_state
+            .modes
+            .iter()
+            .find(|m| m.as_str() == "aead_aes256_gcm_rtpsize")
             .cloned()
-            .or_else(|| ready_state.modes.iter().find(|m| m.as_str() == "xsalsa20_poly1305").cloned())
-            .unwrap_or_else(|| "xsalsa20_poly1305_lite".to_string());
+            .or_else(|| {
+                ready_state
+                    .modes
+                    .iter()
+                    .find(|m| m.as_str() == "aead_xchacha20_poly1305_rtpsize")
+                    .cloned()
+            })
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::Unsupported,
+                    format!(
+                        "voice gateway READY offered no supported encryption modes: {:?}",
+                        ready_state.modes
+                    ),
+                )
+            })?;
+        let cipher_mode = rtp::CipherMode::from_str(&mode).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                format!("unrecognized encryption mode: {mode}"),
+            )
+        })?;
         let select = SelectProtocol {
             protocol: "udp",
             data: SelectProtocolData {
@@ -1521,12 +1878,14 @@ mod session {
             Arc::clone(&socket),
             Arc::clone(&secret),
             handshake.ssrc,
+            cipher_mode,
             say_rx,
             cancel_tx.clone(),
         );
         spawn_inbound_loop(
             Arc::clone(&socket),
             Arc::clone(&secret),
+            cipher_mode,
             channel_id,
             cancel_tx.clone(),
         );
@@ -1561,6 +1920,7 @@ mod session {
         socket: Arc<UdpSocket>,
         secret: Arc<[u8; 32]>,
         ssrc: u32,
+        cipher_mode: rtp::CipherMode,
         mut say_rx: mpsc::UnboundedReceiver<String>,
         cancel_signal: mpsc::Sender<()>,
     ) {
@@ -1600,7 +1960,7 @@ mod session {
                         padded.resize(codec::FRAME_SAMPLES_TOTAL, 0.0);
                         if let Err(e) = send_one_frame(
                             &socket, &secret, ssrc, &mut seq, &mut ts,
-                            &mut nonce_counter, &mut encoder, &padded,
+                            &mut nonce_counter, cipher_mode, &mut encoder, &padded,
                         ).await {
                             eprintln!("voice: outbound send failed: {e}");
                             let _ = cancel_signal.send(()).await;
@@ -1608,7 +1968,7 @@ mod session {
                         }
                     } else if let Err(e) = send_one_frame(
                         &socket, &secret, ssrc, &mut seq, &mut ts,
-                        &mut nonce_counter, &mut encoder, chunk,
+                        &mut nonce_counter, cipher_mode, &mut encoder, chunk,
                     ).await {
                         eprintln!("voice: outbound send failed: {e}");
                         let _ = cancel_signal.send(()).await;
@@ -1627,12 +1987,13 @@ mod session {
         seq: &mut u16,
         ts: &mut u32,
         nonce_counter: &mut u32,
+        cipher_mode: rtp::CipherMode,
         encoder: &mut codec::Encoder,
         pcm: &[f32],
     ) -> std::io::Result<()> {
         let opus = encoder.encode(pcm)?;
         let header = rtp::rtp_header(*seq, *ts, ssrc);
-        let packet = rtp::encrypt_packet(&header, &opus, secret, nonce_counter)?;
+        let packet = rtp::encrypt_packet(&header, &opus, secret, nonce_counter, cipher_mode)?;
         socket.send(&packet).await?;
         *seq = seq.wrapping_add(1);
         *ts = ts.wrapping_add(codec::FRAME_SAMPLES_PER_CHANNEL as u32);
@@ -1645,6 +2006,7 @@ mod session {
     fn spawn_inbound_loop(
         socket: Arc<UdpSocket>,
         secret: Arc<[u8; 32]>,
+        cipher_mode: rtp::CipherMode,
         channel_id: u64,
         cancel_signal: mpsc::Sender<()>,
     ) {
@@ -1669,7 +2031,7 @@ mod session {
                         return;
                     }
                 };
-                let (_hdr, opus) = match rtp::decrypt_packet(&buf[..n], &secret) {
+                let (_hdr, opus) = match rtp::decrypt_packet(&buf[..n], &secret, cipher_mode) {
                     Ok(t) => t,
                     Err(e) => {
                         // Discord injects keepalive / unknown packets
