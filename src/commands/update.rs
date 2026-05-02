@@ -84,20 +84,23 @@ pub fn run() {
     if dashboard_changed {
         println!("\nBuilding dashboard...");
         let dashboard_dir = repo.join("dashboard");
-        let status = Command::new("npm")
-            .args(["ci"])
+        // The dashboard's lockfile is bun.lock — using npm here would either
+        // fail outright (bun-only host) or install from a stale
+        // package-lock.json and produce a divergent dependency tree.
+        let status = Command::new("bun")
+            .args(["install", "--frozen-lockfile"])
             .current_dir(&dashboard_dir)
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("Error: npm ci failed");
+            eprintln!("Error: bun install failed");
             std::process::exit(1);
         }
-        let status = Command::new("npm")
+        let status = Command::new("bun")
             .args(["run", "build"])
             .current_dir(&dashboard_dir)
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("Error: npm run build failed");
+            eprintln!("Error: bun run build failed");
             std::process::exit(1);
         }
 
