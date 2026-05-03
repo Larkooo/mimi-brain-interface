@@ -305,6 +305,9 @@ function DetailPanel({ id, onChanged, onDeleted }: {
         <KV k="cwd">
           <span className="truncate" title={meta.cwd}>{meta.cwd}</span>
         </KV>
+        {meta.report_channel_id && (
+          <KV k="report thread"><CopyableMono text={meta.report_channel_id} /></KV>
+        )}
       </div>
 
       <div className="px-4 py-2 border-b border-border">
@@ -412,10 +415,16 @@ function SpawnForm({ onSpawned, onCancel }: { onSpawned: (id: string) => void; o
   const [prompt, setPrompt] = useState('')
   const [model, setModel] = useState('')
   const [cwd, setCwd] = useState('')
+  const [reportParent, setReportParent] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
   const submit = async () => {
     if (!name.trim() || !prompt.trim()) { setErr('name + prompt required'); return }
+    const rp = reportParent.trim()
+    if (rp && !/^\d+$/.test(rp)) {
+      setErr('report thread parent must be a numeric Discord channel id')
+      return
+    }
     setBusy(true); setErr(null)
     try {
       const r = await spawnSubagent({
@@ -423,6 +432,7 @@ function SpawnForm({ onSpawned, onCancel }: { onSpawned: (id: string) => void; o
         prompt: prompt.trim(),
         model: model.trim() || undefined,
         cwd: cwd.trim() || undefined,
+        report_thread_parent: rp || undefined,
       })
       onSpawned(r.id)
     } catch (e) {
@@ -460,6 +470,17 @@ function SpawnForm({ onSpawned, onCancel }: { onSpawned: (id: string) => void; o
           onChange={e => setCwd(e.target.value)}
           className="px-2 py-1.5 bg-muted border border-border text-[12px] font-mono"
         />
+      </div>
+      <div>
+        <input
+          placeholder="discord report thread parent channel id (optional)"
+          value={reportParent}
+          onChange={e => setReportParent(e.target.value)}
+          className="w-full px-2 py-1.5 bg-muted border border-border text-[12px] font-mono"
+        />
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          # if set, a public thread is created under this channel and the agent posts progress into it
+        </div>
       </div>
       {err && <div className="text-[11px]" style={{ color: 'var(--danger)' }}>{err}</div>}
       <div className="flex gap-2">
