@@ -576,6 +576,12 @@ struct InlineImage {
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMAGES_PER_TURN: usize = 10;
 
+// Cap for non-image attachments that get downloaded to /tmp and surfaced
+// via `attachment_file_path` on the inbound `<channel>` tag. Anything
+// bigger is silently skipped (debug log only) — we don't want a 200MB
+// video or zip swallowing memory or filling up /tmp.
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
 fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
     match ct {
         "image/jpeg" | "image/jpg" => Some("image/jpeg"),
@@ -584,6 +590,112 @@ fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
         "image/webp" => Some("image/webp"),
         _ => None,
     }
+}
+
+// Pick a sensible file extension for the /tmp dump — Discord gives us a
+// filename, fall back to content-type heuristics, then plain "bin". Keeps
+// extensions short + ascii so downstream Read tooling doesn't choke.
+fn pick_attachment_ext(filename: &str, content_type: &str) -> String {
+    if let Some(idx) = filename.rfind('.') {
+        let ext = &filename[idx + 1..];
+        if !ext.is_empty()
+            && ext.len() <= 8
+            && ext.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return ext.to_ascii_lowercase();
+        }
+    }
+    match content_type {
+        "application/pdf" => "pdf".into(),
+        "application/json" => "json".into(),
+        "application/zip" => "zip".into(),
+        "text/plain" => "txt".into(),
+        "text/markdown" => "md".into(),
+        "text/csv" => "csv".into(),
+        "text/html" => "html".into(),
+        ct if ct.starts_with("text/") => "txt".into(),
+        _ => "bin".into(),
+    }
+}
+
+// Download the first non-image attachment from a Discord attachments array
+// to /tmp and return its absolute path. Caller surfaces it as
+// `attachment_file_path` on the inbound channel tag so Mimi can Read it.
+//
+// Skips silently (Ok(None)) when:
+//   - the array is empty / missing,
+//   - every attachment is an image (those go through the inline-base64
+//     path already),
+//   - the first non-image is larger than MAX_ATTACHMENT_BYTES,
+//   - or the fetch / write fails (we'd rather drop the attachment than
+//     crash the turn).
+//
+// TODO(multi-attach): v1 only surfaces the first non-image attachment. If
+// users start dropping multiple files in one message we should bump the
+// inbound tag to accept a list (e.g. `attachment_file_paths="a,b,c"` or
+// repeated `<attachment>` children) and download up to N.
+async fn download_first_nonimage_attachment(
+    client: &reqwest::Client,
+    attachments: Option<&Value>,
+) -> Option<String> {
+    let arr = attachments.and_then(|x| x.as_array())?;
+    for a in arr {
+        let url = match a.get("url").and_then(|x| x.as_str()) {
+            Some(u) => u,
+            None => continue,
+        };
+        let content_type = a
+            .get("content_type")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        // Images already flow through the inline-base64 path — don't
+        // double-surface them.
+        if content_type.starts_with("image/") {
+            continue;
+        }
+        let filename = a
+            .get("filename")
+            .and_then(|x| x.as_str())
+            .unwrap_or("");
+        // Pre-flight size check (Discord includes `size` in bytes on the
+        // attachment payload). Saves us the fetch on huge files.
+        if let Some(size) = a.get("size").and_then(|x| x.as_u64()) {
+            if size as usize > MAX_ATTACHMENT_BYTES {
+                eprintln!(
+                    "discord: skipping attachment {filename} ({size} bytes > {MAX_ATTACHMENT_BYTES} cap)"
+                );
+                continue;
+            }
+        }
+        let bytes = match fetch_attachment_bytes(client, url).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("discord: attachment fetch failed: {e}");
+                continue;
+            }
+        };
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            eprintln!(
+                "discord: skipping attachment {filename} ({} bytes > {} cap after fetch)",
+                bytes.len(),
+                MAX_ATTACHMENT_BYTES
+            );
+            continue;
+        }
+        let ext = pick_attachment_ext(filename, content_type);
+        let id = uuid::Uuid::new_v4();
+        let path = format!("/tmp/mimi-attach-{id}.{ext}");
+        if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            eprintln!("discord: failed to write attachment to {path}: {e}");
+            continue;
+        }
+        eprintln!(
+            "discord: downloaded attachment {filename} ({} bytes, {content_type}) -> {path}",
+            bytes.len()
+        );
+        return Some(path);
+    }
+    None
 }
 
 async fn feed_claude(
@@ -1073,7 +1185,26 @@ async fn run_gateway(
             })
             .unwrap_or_default();
         if channel_id == 0 { continue; }
-        if content.is_empty() && image_attachments.is_empty() { continue; }
+        // Detect non-image attachments up-front so a message that's *only*
+        // a file (no text, no image) still makes it past the empty-turn
+        // guard. The actual download happens below alongside images.
+        let has_nonimage_attachment = d
+            .get("attachments")
+            .and_then(|x| x.as_array())
+            .map(|arr| {
+                arr.iter().any(|a| {
+                    let ct = a
+                        .get("content_type")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    !ct.starts_with("image/")
+                        && a.get("url").and_then(|x| x.as_str()).is_some()
+                })
+            })
+            .unwrap_or(false);
+        if content.is_empty() && image_attachments.is_empty() && !has_nonimage_attachment {
+            continue;
+        }
 
         let guild_id: Option<u64> = d.get("guild_id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok());
@@ -1225,6 +1356,12 @@ async fn run_gateway(
             }
         }
 
+        // Non-image attachments — pulled to /tmp and surfaced as
+        // `attachment_file_path` on the inbound channel tag so Mimi can
+        // Read the file directly. v1: first non-image attachment only.
+        let attachment_file_path =
+            download_first_nonimage_attachment(client, d.get("attachments")).await;
+
         let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
         let channel_id_str = channel_id.to_string();
         let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
@@ -1244,8 +1381,16 @@ async fn run_gateway(
                 if images.len() == 1 { "" } else { "s" }
             )
         };
+        let attachment_attr = attachment_file_path
+            .as_deref()
+            .map(|p| format!(" attachment_file_path=\"{p}\""))
+            .unwrap_or_default();
+        let attachment_marker = match attachment_file_path.as_deref() {
+            Some(p) => format!("\n[attachment available at {p} — Read it for content]"),
+            None => String::new(),
+        };
         let wrapped = format!(
-            "{time_ctx}{guest_memory}{guest_preamble}{OUTBOUND_PROTOCOL}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\">\n{ref_context}{content}{image_marker}\n</channel>",
+            "{time_ctx}{guest_memory}{guest_preamble}{OUTBOUND_PROTOCOL}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\"{attachment_attr}>\n{ref_context}{content}{image_marker}{attachment_marker}\n</channel>",
             perm = permission.as_str()
         );
         // User-msg already logged to context_buffer above (passive-awareness
