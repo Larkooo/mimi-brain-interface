@@ -187,6 +187,11 @@ enum BrainCommands {
         /// Search query
         query: String,
     },
+    /// Show an entity with its full relationship neighborhood
+    Show {
+        /// Entity ID
+        id: i64,
+    },
     /// List entities, optionally filtered by type
     List {
         /// Filter by entity type
@@ -373,6 +378,7 @@ async fn main() {
                 target,
             } => commands::brain::link(source, &rel, target),
             BrainCommands::Search { query } => commands::brain::search(&query),
+            BrainCommands::Show { id } => commands::brain::show(id),
             BrainCommands::List { r#type } => commands::brain::list(r#type.as_deref()),
         },
         Some(Commands::Mcp { command }) => match command {
