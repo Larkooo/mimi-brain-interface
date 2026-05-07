@@ -281,6 +281,9 @@ pub async fn start() -> Result<(), String> {
     // gateway hook needs the main Discord gateway connection that *this*
     // process owns.
     tokio::spawn(crate::channels::voice::control::serve());
+    // Reap stale /tmp/mimi-attach-* files from past turns and crashed
+    // runs so /tmp doesn't slowly fill up.
+    tokio::spawn(attachment_sweeper());
 
     // Gateway reader loop — reconnects forever on disconnect.
     loop {
@@ -582,6 +585,25 @@ const MAX_IMAGES_PER_TURN: usize = 10;
 // video or zip swallowing memory or filling up /tmp.
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
+// Filename prefix for downloaded non-image attachments. Used both for
+// writing fresh files and for the periodic sweep that reaps stale ones.
+const ATTACHMENT_PREFIX: &str = "mimi-attach-";
+
+// How long a downloaded attachment may sit on disk before the sweeper
+// is allowed to delete it. Discord turns finish in seconds-to-minutes
+// and Claude inlines the file contents into her context as soon as she
+// Reads it, so anything older than this is almost certainly orphaned.
+const ATTACHMENT_TTL: Duration = Duration::from_secs(60 * 60);
+
+// Sweep cadence for `attachment_sweeper`. Spawned once from `start()`;
+// runs immediately to clear orphans from previous crashes, then every
+// interval after that.
+const ATTACHMENT_SWEEP_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
+fn attachment_path(id: uuid::Uuid, ext: &str) -> PathBuf {
+    PathBuf::from("/tmp").join(format!("{ATTACHMENT_PREFIX}{id}.{ext}"))
+}
+
 fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
     match ct {
         "image/jpeg" | "image/jpg" => Some("image/jpeg"),
@@ -684,18 +706,137 @@ async fn download_first_nonimage_attachment(
         }
         let ext = pick_attachment_ext(filename, content_type);
         let id = uuid::Uuid::new_v4();
-        let path = format!("/tmp/mimi-attach-{id}.{ext}");
+        let path = attachment_path(id, &ext);
         if let Err(e) = tokio::fs::write(&path, &bytes).await {
-            eprintln!("discord: failed to write attachment to {path}: {e}");
+            eprintln!("discord: failed to write attachment to {}: {e}", path.display());
             continue;
         }
         eprintln!(
-            "discord: downloaded attachment {filename} ({} bytes, {content_type}) -> {path}",
-            bytes.len()
+            "discord: downloaded attachment {filename} ({} bytes, {content_type}) -> {}",
+            bytes.len(),
+            path.display()
         );
-        return Some(path);
+        return Some(path.to_string_lossy().into_owned());
     }
     None
+}
+
+// Periodically reap stale `/tmp/mimi-attach-*` files. The download path
+// above writes one file per non-image attachment but never deletes it
+// — the reader (Claude) inlines the contents into context on Read, so
+// the on-disk copy is dead weight after the turn finishes. Without this
+// sweep, an active Discord channel slowly fills /tmp (often tmpfs).
+//
+// Spawned once from `start()`. Runs immediately to clear orphans from
+// previous process crashes, then every `ATTACHMENT_SWEEP_INTERVAL`.
+async fn attachment_sweeper() {
+    loop {
+        match sweep_attachments_in("/tmp".as_ref(), ATTACHMENT_TTL).await {
+            Ok(n) if n > 0 => eprintln!("discord: swept {n} stale attachment file(s) from /tmp"),
+            Ok(_) => {}
+            Err(e) => eprintln!("discord: attachment sweep failed: {e}"),
+        }
+        tokio::time::sleep(ATTACHMENT_SWEEP_INTERVAL).await;
+    }
+}
+
+async fn sweep_attachments_in(dir: &std::path::Path, ttl: Duration) -> std::io::Result<usize> {
+    let mut removed = 0usize;
+    let mut entries = tokio::fs::read_dir(dir).await?;
+    let now = std::time::SystemTime::now();
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if !name_str.starts_with(ATTACHMENT_PREFIX) {
+            continue;
+        }
+        let meta = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(now);
+        let age = now.duration_since(mtime).unwrap_or_default();
+        if age < ttl {
+            continue;
+        }
+        let path = entry.path();
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => removed += 1,
+            Err(e) => eprintln!("discord: failed to remove stale {}: {e}", path.display()),
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(test)]
+mod attachment_tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    #[tokio::test]
+    async fn sweep_removes_only_stale_prefixed_files() {
+        let dir = tempdir().expect("tempdir");
+        let stale = dir.path().join(format!("{ATTACHMENT_PREFIX}old.txt"));
+        let fresh = dir.path().join(format!("{ATTACHMENT_PREFIX}new.txt"));
+        let other = dir.path().join("not-ours.txt");
+        tokio::fs::write(&stale, b"old").await.unwrap();
+        tokio::fs::write(&fresh, b"new").await.unwrap();
+        tokio::fs::write(&other, b"other").await.unwrap();
+        // Backdate the "stale" file's mtime well past the TTL we'll pass.
+        let an_hour_ago = SystemTime::now() - Duration::from_secs(60 * 60);
+        let times = std::fs::FileTimes::new()
+            .set_modified(an_hour_ago)
+            .set_accessed(an_hour_ago);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+        // Backdate the "other" file too — proves prefix filter works
+        // independently of age.
+        std::fs::File::options()
+            .write(true)
+            .open(&other)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
+
+        let removed = sweep_attachments_in(dir.path(), Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert_eq!(removed, 1);
+        assert!(!stale.exists(), "stale attachment should be removed");
+        assert!(fresh.exists(), "fresh attachment must survive");
+        assert!(other.exists(), "non-attachment files must be left alone");
+    }
+
+    fn tempdir() -> std::io::Result<TempDir> {
+        TempDir::new()
+    }
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new() -> std::io::Result<Self> {
+            let p = std::env::temp_dir().join(format!(
+                "mimi-attach-sweep-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::create_dir(&p)?;
+            Ok(TempDir(p))
+        }
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
 }
 
 async fn feed_claude(
