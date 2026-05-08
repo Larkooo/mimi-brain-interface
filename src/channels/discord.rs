@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -243,6 +243,42 @@ const GATEWAY_URL: &str = "wss://gateway.discord.gg/?v=10&encoding=json";
 // Set from the READY event payload. Used to detect @mentions and replies
 // directed at us in guild channels.
 static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
+
+// Resume state. Lives module-wide so it survives across `run_gateway`
+// invocations (the outer reconnect loop in `start` re-enters the function
+// on every disconnect). Populated from the READY event (`session_id`,
+// `resume_gateway_url`); consulted on every reconnect to decide whether
+// to send op 6 RESUME (recover missed events) or op 2 IDENTIFY (fresh
+// session). Cleared on op 9 Invalid Session with `d == false`, since the
+// session became unrecoverable and Discord requires a fresh handshake.
+#[derive(Clone, Debug)]
+struct ResumeInfo {
+    session_id: String,
+    gateway_url: String,
+}
+static RESUME_INFO: RwLock<Option<ResumeInfo>> = RwLock::new(None);
+// Last `s` (sequence) seen on a dispatched event; -1 means "none yet". Sent
+// in op 6 RESUME so Discord can replay every dispatch we missed during the
+// disconnect window.
+static LAST_SEQ: AtomicI64 = AtomicI64::new(-1);
+
+fn store_resume(session_id: String, gateway_url: String) {
+    *RESUME_INFO.write().unwrap_or_else(|e| e.into_inner()) =
+        Some(ResumeInfo { session_id, gateway_url });
+}
+
+fn current_resume() -> Option<ResumeInfo> {
+    RESUME_INFO
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+fn clear_resume() {
+    *RESUME_INFO.write().unwrap_or_else(|e| e.into_inner()) = None;
+    LAST_SEQ.store(-1, Ordering::SeqCst);
+}
+
 
 /// Main entrypoint — blocks until killed.
 pub async fn start() -> Result<(), String> {
@@ -1002,7 +1038,18 @@ async fn run_gateway(
     to_claude: &mpsc::Sender<UserTurn>,
     client: &reqwest::Client,
 ) -> Result<(), String> {
-    let (ws, _) = connect_async(GATEWAY_URL).await.map_err(|e| format!("connect: {e}"))?;
+    // If we have a live session_id + last seq from a prior connection,
+    // attempt op 6 RESUME against the resume_gateway_url Discord handed
+    // out in READY. Falls back to a fresh op 2 IDENTIFY when no resume
+    // state is set, when this is the first connect, or after Discord
+    // tells us the session is unrecoverable (op 9 with d=false).
+    let resume_attempt = current_resume()
+        .filter(|_| LAST_SEQ.load(Ordering::SeqCst) >= 0);
+    let connect_url = resume_attempt
+        .as_ref()
+        .map(|r| r.gateway_url.as_str())
+        .unwrap_or(GATEWAY_URL);
+    let (ws, _) = connect_async(connect_url).await.map_err(|e| format!("connect: {e}"))?;
     let (mut write, mut read) = ws.split();
 
     // Receive HELLO
@@ -1017,17 +1064,39 @@ async fn run_gateway(
     let heartbeat_ms = hello_json.pointer("/d/heartbeat_interval").and_then(|x| x.as_u64())
         .ok_or("no heartbeat_interval in HELLO")?;
 
-    // IDENTIFY
-    let identify = json!({
-        "op": 2,
-        "d": {
-            "token": token,
-            "intents": INTENTS,
-            "properties": { "os": "linux", "browser": "mimi", "device": "mimi" }
-        }
-    });
-    write.send(Message::Text(identify.to_string().into())).await
-        .map_err(|e| format!("send identify: {e}"))?;
+    // Handshake — RESUME if we have viable state, IDENTIFY otherwise. After
+    // a successful RESUME, Discord replays missed dispatches and emits a
+    // RESUMED event; on failure it emits op 9 (Invalid Session) which we
+    // handle below.
+    if let Some(r) = &resume_attempt {
+        let seq = LAST_SEQ.load(Ordering::SeqCst);
+        eprintln!(
+            "discord: RESUME session_id={} last_seq={} url={}",
+            r.session_id, seq, r.gateway_url
+        );
+        let resume = json!({
+            "op": 6,
+            "d": {
+                "token": token,
+                "session_id": r.session_id,
+                "seq": seq,
+            }
+        });
+        write.send(Message::Text(resume.to_string().into())).await
+            .map_err(|e| format!("send resume: {e}"))?;
+    } else {
+        eprintln!("discord: IDENTIFY (fresh session)");
+        let identify = json!({
+            "op": 2,
+            "d": {
+                "token": token,
+                "intents": INTENTS,
+                "properties": { "os": "linux", "browser": "mimi", "device": "mimi" }
+            }
+        });
+        write.send(Message::Text(identify.to_string().into())).await
+            .map_err(|e| format!("send identify: {e}"))?;
+    }
 
     let write = std::sync::Arc::new(tokio::sync::Mutex::new(write));
 
@@ -1084,8 +1153,35 @@ async fn run_gateway(
         let v: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
         if let Some(s) = v.get("s").and_then(|x| x.as_u64()) {
             *last_seq.write().await = Some(s);
+            // Mirror into the module-wide atomic so the next reconnect
+            // can RESUME from the right point even after this gateway
+            // task is gone.
+            LAST_SEQ.store(s as i64, Ordering::SeqCst);
         }
         let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(0);
+        // op 7 Reconnect: Discord wants us to disconnect and resume. We
+        // keep RESUME_INFO + LAST_SEQ so the outer reconnect loop comes
+        // back via op 6 RESUME on the resume_gateway_url.
+        if op == 7 {
+            eprintln!("discord: op 7 Reconnect — disconnecting to resume");
+            hb_task.abort();
+            drain_task.abort();
+            return Err("op 7 Reconnect requested".into());
+        }
+        // op 9 Invalid Session: our session is gone. `d == true` means
+        // resumable (rare — a transient hiccup); `d == false` means we
+        // must IDENTIFY fresh, so wipe the state. Either way, drop the
+        // socket and let the outer loop reconnect.
+        if op == 9 {
+            let resumable = v.get("d").and_then(|x| x.as_bool()).unwrap_or(false);
+            eprintln!("discord: op 9 Invalid Session (resumable={resumable})");
+            if !resumable {
+                clear_resume();
+            }
+            hb_task.abort();
+            drain_task.abort();
+            return Err("op 9 Invalid Session".into());
+        }
         if op != 0 { continue; } // 0 = dispatched event
         let event = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
 
@@ -1097,6 +1193,28 @@ async fn run_gateway(
                 crate::channels::voice::set_bot_user_id(id);
                 eprintln!("discord: ready, bot_user_id={id}");
             }
+            // Capture resume credentials for the next reconnect. Discord
+            // gives us a session-specific gateway URL we should hit on
+            // op 6 RESUME; fall back to the canonical URL if absent.
+            let session_id = v.pointer("/d/session_id")
+                .and_then(|x| x.as_str()).map(str::to_string);
+            let resume_url = v.pointer("/d/resume_gateway_url")
+                .and_then(|x| x.as_str()).map(str::to_string)
+                .unwrap_or_else(|| GATEWAY_URL.to_string());
+            if let Some(sid) = session_id {
+                store_resume(sid, resume_url);
+            }
+            continue;
+        }
+
+        if event == "RESUMED" {
+            // Server has finished replaying missed dispatches. Anything
+            // received between op 6 and now is a real, in-band event we
+            // would have lost without resume — this is the win.
+            eprintln!(
+                "discord: RESUMED — session restored, replay complete (last_seq={})",
+                LAST_SEQ.load(Ordering::SeqCst)
+            );
             continue;
         }
 
