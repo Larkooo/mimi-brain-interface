@@ -114,6 +114,50 @@ pub fn run() {
     }
 
     println!("\nUpdate complete: now at {}", &after[..7.min(after.len())]);
+
+    // Restart active user services so they pick up the new binary/dashboard.
+    // Without this, daemons keep running the old code until the owner restarts
+    // them by hand — making `mimi update` effectively a no-op for the live
+    // system. `is-active` gating skips services the owner has intentionally
+    // stopped. Dashboard-only changes only need mimi-dashboard, since it's
+    // the process that serves the dist/ tree.
+    let rust_units = ["mimi-discord", "mimi-telegram", "mimi-presence", "mimi-dashboard"];
+    let dashboard_only_units = ["mimi-dashboard"];
+    let to_restart: &[&str] = if rust_changed {
+        &rust_units
+    } else if dashboard_changed {
+        &dashboard_only_units
+    } else {
+        &[]
+    };
+    if !to_restart.is_empty() {
+        println!("\nRestarting active user services...");
+        for service in to_restart {
+            if !service_is_active(service) {
+                println!("  {service}: not active, skipping");
+                continue;
+            }
+            match Command::new("systemctl")
+                .args(["--user", "restart", service])
+                .output()
+            {
+                Ok(o) if o.status.success() => println!("  {service}: restarted"),
+                Ok(o) => eprintln!(
+                    "  {service}: restart failed: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ),
+                Err(e) => eprintln!("  {service}: restart error: {e}"),
+            }
+        }
+    }
+}
+
+fn service_is_active(service: &str) -> bool {
+    Command::new("systemctl")
+        .args(["--user", "is-active", "--quiet", service])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn git(repo: &Path, args: &[&str]) -> bool {
