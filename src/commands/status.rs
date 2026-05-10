@@ -43,6 +43,31 @@ pub fn run() {
         println!("  Claude:   {}", version);
     }
 
+    // Systemd user-services that run a deployed Mimi. Mirrors the unit list
+    // that `mimi update` restarts after a deploy. We probe via `systemctl
+    // --user is-active` and surface three buckets: active (the bot is up),
+    // inactive (unit exists but is stopped — could be intentional or a
+    // crash), or missing (no such unit on this host — fine for hosts that
+    // don't run that channel).
+    println!("\n  Services:");
+    let mut any_unit = false;
+    for unit in ["mimi-dashboard", "mimi-discord", "mimi-telegram", "mimi-presence"] {
+        match service_state(unit) {
+            ServiceState::Active => {
+                any_unit = true;
+                println!("    {:18} active", unit);
+            }
+            ServiceState::Inactive(state) => {
+                any_unit = true;
+                println!("    {:18} {} (run: systemctl --user start {})", unit, state, unit);
+            }
+            ServiceState::Missing => {}
+        }
+    }
+    if !any_unit {
+        println!("    (no mimi-* user services installed)");
+    }
+
     // Brain stats
     let db = brain::open();
     match brain::get_stats(&db) {
@@ -76,6 +101,49 @@ pub fn run() {
     // Data dir size
     let size = dir_size(paths::home());
     println!("  Data size:    {}", format_bytes(size));
+}
+
+/// Active = unit running. Inactive(state) = unit exists but `is-active`
+/// returned a non-success state (e.g. "inactive", "failed", "activating").
+/// Missing = `is-active` couldn't find the unit at all (different exit on
+/// `LoadState=not-found`), so we hide it from output rather than nag the
+/// user about a service they never installed.
+enum ServiceState {
+    Active,
+    Inactive(String),
+    Missing,
+}
+
+fn service_state(unit: &str) -> ServiceState {
+    let out = match Command::new("systemctl")
+        .args(["--user", "is-active", unit])
+        .output()
+    {
+        Ok(o) => o,
+        // systemctl unavailable (non-systemd host, no DBus): treat as missing
+        // so we don't print a confusing error for every unit.
+        Err(_) => return ServiceState::Missing,
+    };
+    let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() && state == "active" {
+        return ServiceState::Active;
+    }
+    // `is-active` prints "inactive" with exit 3 for stopped units AND for
+    // unknown units. Disambiguate via `show -p LoadState`: "not-found" means
+    // the unit isn't installed; anything else means it exists but isn't up.
+    let load = Command::new("systemctl")
+        .args(["--user", "show", "-p", "LoadState", "--value", unit])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    // Empty load means systemctl couldn't determine LoadState (unreachable
+    // bus, no user manager). "not-found" is the explicit "no such unit"
+    // signal. Either way, hide the unit rather than mislabel it inactive.
+    if load.is_empty() || load == "not-found" {
+        ServiceState::Missing
+    } else {
+        ServiceState::Inactive(if state.is_empty() { "inactive".into() } else { state })
+    }
 }
 
 fn dir_size(path: std::path::PathBuf) -> u64 {
