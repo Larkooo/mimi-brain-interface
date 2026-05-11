@@ -416,9 +416,20 @@ async fn api_mcp_list() -> Result<Json<serde_json::Value>, (StatusCode, String)>
 
 // --- Backup ---
 
-async fn api_backup() -> Json<serde_json::Value> {
-    commands::backup::run();
-    Json(serde_json::json!({ "ok": true }))
+async fn api_backup() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // tar can take seconds on a chunky ~/.mimi — run it off the runtime so
+    // the dashboard stays responsive. Any error (tar missing, disk full,
+    // permission denied, panic) bubbles up as a 500 instead of std::process::exit
+    // killing the whole dashboard process the way commands::backup::run() does.
+    let backup = tokio::task::spawn_blocking(commands::backup::create)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("backup task panicked: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "path": backup.path.display().to_string(),
+        "size_bytes": backup.size_bytes,
+    })))
 }
 
 // --- Memory ---
