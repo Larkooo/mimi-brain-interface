@@ -84,20 +84,24 @@ pub fn run() {
     if dashboard_changed {
         println!("\nBuilding dashboard...");
         let dashboard_dir = repo.join("dashboard");
-        let status = Command::new("npm")
-            .args(["ci"])
+        // Dashboard is a bun project — bun.lock is the authoritative
+        // lockfile (see HANDOFF.md). Falling back to npm rewrites
+        // package-lock.json and can install slightly different versions
+        // than what was tested.
+        let status = Command::new("bun")
+            .args(["install", "--frozen-lockfile"])
             .current_dir(&dashboard_dir)
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("Error: npm ci failed");
+            eprintln!("Error: bun install --frozen-lockfile failed");
             std::process::exit(1);
         }
-        let status = Command::new("npm")
+        let status = Command::new("bun")
             .args(["run", "build"])
             .current_dir(&dashboard_dir)
             .status();
         if !matches!(status, Ok(s) if s.success()) {
-            eprintln!("Error: npm run build failed");
+            eprintln!("Error: bun run build failed");
             std::process::exit(1);
         }
 
@@ -110,7 +114,7 @@ pub fn run() {
         });
         println!("Copied dashboard to {}", dest.display());
     } else {
-        println!("No dashboard changes — skipping npm build.");
+        println!("No dashboard changes — skipping bun build.");
     }
 
     println!("\nUpdate complete: now at {}", &after[..7.min(after.len())]);
