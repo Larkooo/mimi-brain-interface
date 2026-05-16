@@ -670,11 +670,21 @@ struct ServiceInfo {
     enabled: bool,
 }
 
-fn systemctl_user(args: &[&str]) -> Option<String> {
+fn systemctl_user(args: &[&str]) -> Result<String, String> {
     let out = std::process::Command::new("systemctl")
-        .arg("--user").args(args).output().ok()?;
-    if !out.status.success() { return None; }
-    Some(String::from_utf8_lossy(&out.stdout).to_string())
+        .arg("--user").args(args).output()
+        .map_err(|e| format!("failed to spawn systemctl: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let msg = match (stderr.is_empty(), stdout.is_empty()) {
+            (false, _) => stderr,
+            (true, false) => stdout,
+            (true, true) => format!("systemctl --user {} exited with {}", args.join(" "), out.status),
+        };
+        return Err(msg);
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
 }
 
 fn service_info(name: &str) -> ServiceInfo {
@@ -687,6 +697,8 @@ fn service_info(name: &str) -> ServiceInfo {
         else if let Some(v) = line.strip_prefix("SubState=") { sub_state = v.into(); }
         else if let Some(v) = line.strip_prefix("MainPID=") { main_pid = v.parse().ok().filter(|p| *p != 0); }
     }
+    // `is-enabled` exits non-zero for disabled/static/masked units; treat any
+    // non-success as "not enabled" rather than surfacing it as an error.
     let enabled = systemctl_user(&["is-enabled", name])
         .map(|s| s.trim() == "enabled")
         .unwrap_or(false);
@@ -704,7 +716,7 @@ async fn api_services_start(axum::extract::Path(name): axum::extract::Path<Strin
 {
     if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
     systemctl_user(&["start", &name])
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl start {name} failed")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl start {name}: {e}")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -713,7 +725,7 @@ async fn api_services_stop(axum::extract::Path(name): axum::extract::Path<String
 {
     if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
     systemctl_user(&["stop", &name])
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl stop {name} failed")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl stop {name}: {e}")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
@@ -722,7 +734,7 @@ async fn api_services_restart(axum::extract::Path(name): axum::extract::Path<Str
 {
     if !is_managed(&name) { return Err((StatusCode::FORBIDDEN, "unknown service".into())); }
     systemctl_user(&["restart", &name])
-        .ok_or((StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl restart {name} failed")))?;
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("systemctl restart {name}: {e}")))?;
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
