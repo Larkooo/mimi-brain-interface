@@ -430,7 +430,7 @@ async fn main() {
             claude::plugin(&refs);
         }
         Some(Commands::Config) => commands::config::run(),
-        Some(Commands::Backup) => commands::backup::run(),
+        Some(Commands::Backup) => commands::backup::cli_run(),
         Some(Commands::Reflect) => commands::reflect::run(),
         Some(Commands::Audit) => commands::audit::run(),
         Some(Commands::Update) => commands::update::run(),
