@@ -57,6 +57,7 @@ pub async fn start() -> Result<(), String> {
     tokio::spawn(drain_claude(stdout, typing_tx));
 
     let client = reqwest::Client::new();
+    tokio::spawn(send_restart_ping(client.clone(), token.clone()));
     tokio::spawn(typing_loop(client.clone(), token.clone(), typing_rx));
     telegram_reader(client, token, allowlist, to_claude_tx).await
 }
@@ -122,6 +123,69 @@ pub fn stop() -> Result<(), String> {
     let _ = std::fs::remove_file(&path);
     eprintln!("telegram: SIGTERM sent to {pid}");
     Ok(())
+}
+
+fn restart_marker_path() -> PathBuf {
+    channel_dir().join("restart_pending")
+}
+
+/// Drop a marker so the next `mimi channel start telegram` (or systemd
+/// restart of `mimi-telegram`) posts a "back online" ping to `chat_id`.
+/// Telegram chat ids are signed (groups/supergroups are negative).
+///
+/// Mirrors `discord::write_restart_marker`. Any code path that
+/// intentionally restarts the bridge (nightly reflect, `mimi update`
+/// after a rebuild, etc.) should call this first with the chat the
+/// restart was initiated from so the user is told.
+pub fn write_restart_marker(chat_id: i64, msg: Option<&str>) -> Result<(), String> {
+    let dir = channel_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let payload = match msg {
+        Some(m) => format!("{chat_id}:{m}"),
+        None => format!("{chat_id}"),
+    };
+    std::fs::write(restart_marker_path(), payload)
+        .map_err(|e| format!("write restart marker: {e}"))
+}
+
+/// Read the restart marker (if any) and post a "back online" message to
+/// the recorded chat. Telegram has no gateway handshake — `sendMessage`
+/// works as soon as we have a token — but we still wait a beat so the
+/// log line orders after the rest of bridge startup.
+async fn send_restart_ping(client: reqwest::Client, token: String) {
+    let path = restart_marker_path();
+    let contents = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let _ = std::fs::remove_file(&path);
+    let contents = contents.trim();
+    if contents.is_empty() {
+        return;
+    }
+    let (chat_str, msg) = match contents.split_once(':') {
+        Some((c, m)) => (c, m.to_string()),
+        None => (contents, "back online 🌀".to_string()),
+    };
+    let chat: i64 = match chat_str.parse() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("telegram: bad restart marker ({contents:?}): {e}");
+            return;
+        }
+    };
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let url = format!("https://api.telegram.org/bot{token}/sendMessage");
+    let body = json!({ "chat_id": chat, "text": msg });
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => {}
+        Ok(resp) => {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            eprintln!("telegram: restart ping failed: {status} {body}");
+        }
+        Err(e) => eprintln!("telegram: restart ping failed: {e}"),
+    }
 }
 
 fn ensure_session_id() -> Result<String, String> {
