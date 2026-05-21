@@ -77,6 +77,14 @@ pub fn run() {
                 std::process::exit(1);
             }
         }
+
+        // Restart long-running services so they pick up the new binary
+        // immediately. Without this, mimi-{telegram,discord,dashboard} keep
+        // running the previous binary until the next nightly reflect cycle,
+        // which defeats the point of an interactive update. Best-effort: a
+        // missing/unowned unit is skipped silently, a restart failure is
+        // logged but doesn't fail the update.
+        restart_services(&["mimi-telegram", "mimi-discord", "mimi-dashboard"]);
     } else {
         println!("No Rust changes — skipping cargo build.");
     }
@@ -159,6 +167,38 @@ fn git_files_changed(repo: &Path, from: &str, to: &str) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn restart_services(services: &[&str]) {
+    let present: Vec<&&str> = services.iter().filter(|s| service_exists(s)).collect();
+    if present.is_empty() {
+        return;
+    }
+    println!("\nRestarting services to pick up new binary...");
+    for service in present {
+        match Command::new("systemctl")
+            .args(["--user", "restart", service])
+            .output()
+        {
+            Ok(o) if o.status.success() => println!("  {service} restarted"),
+            Ok(o) => eprintln!(
+                "  {service} restart failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            Err(e) => eprintln!("  {service} restart error: {e}"),
+        }
+    }
+}
+
+fn service_exists(name: &str) -> bool {
+    // `systemctl --user cat` succeeds only when the unit is loaded for the
+    // current user. Cheaper and less noisy than calling `restart` and
+    // parsing the "Unit not found" error after the fact.
+    Command::new("systemctl")
+        .args(["--user", "cat", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
 }
 
 fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
