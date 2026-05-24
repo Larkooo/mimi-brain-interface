@@ -135,8 +135,11 @@ pub async fn start() -> Result<(), String> {
 
     write_pidfile()?;
 
-    let schedule = Schedule::load();
-    match &schedule {
+    // Log initial schedule for visibility, then drop it — the loop below
+    // re-reads from disk on every iteration so edits to schedule.json take
+    // effect within SCHEDULE_TICK (or at the next gateway disconnect) with
+    // no need to restart the systemd unit.
+    match Schedule::load() {
         Some(s) => eprintln!(
             "presence: starting (token len={}, schedule: tz={} days={:?} windows={:?})",
             token.len(),
@@ -156,13 +159,14 @@ pub async fn start() -> Result<(), String> {
     // reconnects. 4004 (auth failure) still retries — a persistent 4004
     // means the vault token is stale and will stay bad until updated.
     loop {
+        let schedule = Schedule::load();
         let should_online = schedule.as_ref().map(|s| s.should_be_online()).unwrap_or(true);
         if !should_online {
             // Outside any configured window; poll again soon.
             tokio::time::sleep(SCHEDULE_TICK).await;
             continue;
         }
-        match run_gateway(&token, schedule.as_ref()).await {
+        match run_gateway(&token).await {
             Ok(()) => eprintln!("presence: gateway closed — re-evaluating schedule"),
             Err(e) => {
                 eprintln!("presence: gateway error: {e} — reconnecting in 5s");
@@ -200,7 +204,7 @@ fn write_pidfile() -> Result<(), String> {
         .map_err(|e| format!("write pid: {e}"))
 }
 
-async fn run_gateway(token: &str, schedule: Option<&Schedule>) -> Result<(), String> {
+async fn run_gateway(token: &str) -> Result<(), String> {
     let (ws, _) = connect_async(GATEWAY_URL)
         .await
         .map_err(|e| format!("connect: {e}"))?;
@@ -290,7 +294,10 @@ async fn run_gateway(token: &str, schedule: Option<&Schedule>) -> Result<(), Str
     loop {
         tokio::select! {
             _ = sched_tick.tick() => {
-                if let Some(s) = schedule {
+                // Re-read the schedule each tick so edits to schedule.json
+                // (or its outright removal) take effect mid-session — no
+                // need to restart the systemd unit just to extend a window.
+                if let Some(s) = Schedule::load() {
                     if !s.should_be_online() {
                         eprintln!("presence: schedule window ended — disconnecting");
                         hb_task.abort();
