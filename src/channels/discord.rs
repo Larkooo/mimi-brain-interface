@@ -577,10 +577,17 @@ const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMAGES_PER_TURN: usize = 10;
 
 // Cap for non-image attachments that get downloaded to /tmp and surfaced
-// via `attachment_file_path` on the inbound `<channel>` tag. Anything
+// via `attachment_file_paths` on the inbound `<channel>` tag. Anything
 // bigger is silently skipped (debug log only) — we don't want a 200MB
 // video or zip swallowing memory or filling up /tmp.
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+// Max number of non-image attachments surfaced per turn. Mirrors
+// MAX_IMAGES_PER_TURN — a single Discord message with 20 zip files is
+// almost certainly a bulk drop the user will follow up on, not 20 things
+// we need to read right now. Extras past the cap are skipped with a log
+// line so we don't silently fill /tmp.
+const MAX_NONIMAGE_ATTACHMENTS_PER_TURN: usize = 10;
 
 fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
     match ct {
@@ -618,27 +625,31 @@ fn pick_attachment_ext(filename: &str, content_type: &str) -> String {
     }
 }
 
-// Download the first non-image attachment from a Discord attachments array
-// to /tmp and return its absolute path. Caller surfaces it as
-// `attachment_file_path` on the inbound channel tag so Mimi can Read it.
+// Download every non-image attachment on a Discord message to /tmp and
+// return their absolute paths (in original order). Caller surfaces them
+// as a comma-separated `attachment_file_paths` attribute on the inbound
+// channel tag so Mimi can Read each one.
 //
-// Skips silently (Ok(None)) when:
-//   - the array is empty / missing,
-//   - every attachment is an image (those go through the inline-base64
+// Skips individual attachments (logged + continues) when:
+//   - the entry has no url,
+//   - the content_type is an image (those go through the inline-base64
 //     path already),
-//   - the first non-image is larger than MAX_ATTACHMENT_BYTES,
-//   - or the fetch / write fails (we'd rather drop the attachment than
-//     crash the turn).
+//   - it's larger than MAX_ATTACHMENT_BYTES,
+//   - or the fetch / write fails.
 //
-// TODO(multi-attach): v1 only surfaces the first non-image attachment. If
-// users start dropping multiple files in one message we should bump the
-// inbound tag to accept a list (e.g. `attachment_file_paths="a,b,c"` or
-// repeated `<attachment>` children) and download up to N.
-async fn download_first_nonimage_attachment(
+// After MAX_NONIMAGE_ATTACHMENTS_PER_TURN successful downloads any
+// further non-image entries are skipped with a log line so a single
+// 50-file message can't fill /tmp. Returns an empty Vec when nothing
+// surfaced (caller treats that the same as the old `None`).
+async fn download_nonimage_attachments(
     client: &reqwest::Client,
     attachments: Option<&Value>,
-) -> Option<String> {
-    let arr = attachments.and_then(|x| x.as_array())?;
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let arr = match attachments.and_then(|x| x.as_array()) {
+        Some(a) => a,
+        None => return out,
+    };
     for a in arr {
         let url = match a.get("url").and_then(|x| x.as_str()) {
             Some(u) => u,
@@ -657,6 +668,12 @@ async fn download_first_nonimage_attachment(
             .get("filename")
             .and_then(|x| x.as_str())
             .unwrap_or("");
+        if out.len() >= MAX_NONIMAGE_ATTACHMENTS_PER_TURN {
+            eprintln!(
+                "discord: skipping attachment {filename} (already at cap of {MAX_NONIMAGE_ATTACHMENTS_PER_TURN} per turn)"
+            );
+            continue;
+        }
         // Pre-flight size check (Discord includes `size` in bytes on the
         // attachment payload). Saves us the fetch on huge files.
         if let Some(size) = a.get("size").and_then(|x| x.as_u64()) {
@@ -693,9 +710,9 @@ async fn download_first_nonimage_attachment(
             "discord: downloaded attachment {filename} ({} bytes, {content_type}) -> {path}",
             bytes.len()
         );
-        return Some(path);
+        out.push(path);
     }
-    None
+    out
 }
 
 async fn feed_claude(
@@ -1357,10 +1374,11 @@ async fn run_gateway(
         }
 
         // Non-image attachments — pulled to /tmp and surfaced as
-        // `attachment_file_path` on the inbound channel tag so Mimi can
-        // Read the file directly. v1: first non-image attachment only.
-        let attachment_file_path =
-            download_first_nonimage_attachment(client, d.get("attachments")).await;
+        // `attachment_file_paths="a,b,c"` on the inbound channel tag so
+        // Mimi can Read each file directly. Capped at
+        // MAX_NONIMAGE_ATTACHMENTS_PER_TURN.
+        let attachment_file_paths =
+            download_nonimage_attachments(client, d.get("attachments")).await;
 
         let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
         let channel_id_str = channel_id.to_string();
@@ -1381,13 +1399,24 @@ async fn run_gateway(
                 if images.len() == 1 { "" } else { "s" }
             )
         };
-        let attachment_attr = attachment_file_path
-            .as_deref()
-            .map(|p| format!(" attachment_file_path=\"{p}\""))
-            .unwrap_or_default();
-        let attachment_marker = match attachment_file_path.as_deref() {
-            Some(p) => format!("\n[attachment available at {p} — Read it for content]"),
-            None => String::new(),
+        // Paths are /tmp/mimi-attach-<uuid>.<ext> — uuid is hex+dashes,
+        // ext is ascii-alphanumeric (see pick_attachment_ext), so plain
+        // comma-join is unambiguous.
+        let attachment_attr = if attachment_file_paths.is_empty() {
+            String::new()
+        } else {
+            format!(" attachment_file_paths=\"{}\"", attachment_file_paths.join(","))
+        };
+        let attachment_marker = match attachment_file_paths.len() {
+            0 => String::new(),
+            1 => format!(
+                "\n[attachment available at {} — Read it for content]",
+                attachment_file_paths[0]
+            ),
+            n => format!(
+                "\n[{n} attachments available at {} — Read each for content]",
+                attachment_file_paths.join(", ")
+            ),
         };
         let wrapped = format!(
             "{time_ctx}{guest_memory}{guest_preamble}{OUTBOUND_PROTOCOL}{preamble}<channel source=\"discord\" chat_id=\"{channel_id}\"{guild_attr} user_id=\"{author_id}\" user_name=\"{user_name}\" message_id=\"{message_id}\" permission=\"{perm}\"{attachment_attr}>\n{ref_context}{content}{image_marker}{attachment_marker}\n</channel>",
