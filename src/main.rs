@@ -182,6 +182,17 @@ enum BrainCommands {
         /// Entity ID to delete
         id: i64,
     },
+    /// Update an entity's name and/or properties (relationships preserved)
+    Update {
+        /// Entity ID to update
+        id: i64,
+        /// New name
+        #[arg(short, long)]
+        name: Option<String>,
+        /// New JSON properties (replaces existing)
+        #[arg(short, long)]
+        properties: Option<String>,
+    },
     /// Search entities by text
     Search {
         /// Search query
@@ -367,6 +378,9 @@ async fn main() {
                 properties,
             } => commands::brain::add(&r#type, &name, &properties),
             BrainCommands::Delete { id } => commands::brain::delete(id),
+            BrainCommands::Update { id, name, properties } => {
+                commands::brain::update(id, name.as_deref(), properties.as_deref())
+            }
             BrainCommands::Link {
                 source,
                 rel,
