@@ -92,6 +92,62 @@ pub fn delete(id: i64) {
     }
 }
 
+pub fn show(id: i64) {
+    ensure_brain();
+    let conn = db::open();
+    let detail = match db::get_entity_detail(&conn, id) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let e = &detail.entity;
+    println!("#{} {} ({})", e.id, e.name, e.r#type);
+    println!("  created_at: {}", e.created_at);
+    println!("  updated_at: {}", e.updated_at);
+    if e.properties.is_object()
+        && !e.properties.as_object().unwrap().is_empty()
+    {
+        let pretty = serde_json::to_string_pretty(&e.properties)
+            .unwrap_or_else(|_| e.properties.to_string());
+        println!("  properties:");
+        for line in pretty.lines() {
+            println!("    {line}");
+        }
+    }
+
+    if detail.related.is_empty() {
+        println!("\n  (no relationships)");
+        return;
+    }
+
+    let out: Vec<&db::RelatedEntity> =
+        detail.related.iter().filter(|r| r.direction == "out").collect();
+    let inc: Vec<&db::RelatedEntity> =
+        detail.related.iter().filter(|r| r.direction == "in").collect();
+
+    if !out.is_empty() {
+        println!("\n  Outgoing ({}):", out.len());
+        for r in out {
+            println!(
+                "    --[{}]--> #{:<4} {} ({})",
+                r.r#type, r.other_id, r.other_name, r.other_type
+            );
+        }
+    }
+    if !inc.is_empty() {
+        println!("\n  Incoming ({}):", inc.len());
+        for r in inc {
+            println!(
+                "    <--[{}]-- #{:<4} {} ({})",
+                r.r#type, r.other_id, r.other_name, r.other_type
+            );
+        }
+    }
+}
+
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
     let conn = db::open();

@@ -182,6 +182,11 @@ enum BrainCommands {
         /// Entity ID to delete
         id: i64,
     },
+    /// Show one entity with all its incoming + outgoing relationships
+    Show {
+        /// Entity ID to show
+        id: i64,
+    },
     /// Search entities by text
     Search {
         /// Search query
@@ -367,6 +372,7 @@ async fn main() {
                 properties,
             } => commands::brain::add(&r#type, &name, &properties),
             BrainCommands::Delete { id } => commands::brain::delete(id),
+            BrainCommands::Show { id } => commands::brain::show(id),
             BrainCommands::Link {
                 source,
                 rel,
