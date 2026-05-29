@@ -1,5 +1,7 @@
 use crate::brain;
 use crate::paths;
+use crate::subagents;
+use crate::tasks;
 use std::process::Command;
 
 pub fn run() {
@@ -61,6 +63,27 @@ pub fn run() {
         Err(e) => {
             eprintln!("  Brain stats unavailable: {}", e);
         }
+    }
+
+    // Subagents — long-running claude -p instances. Surface the running
+    // count so `mimi status` reveals what work is in-flight, not just what's
+    // in the knowledge graph.
+    let agents = subagents::list_all();
+    if !agents.is_empty() {
+        let running = agents.iter().filter(|m| m.status == "running").count();
+        println!("\n  Subagents:    {} total, {} running", agents.len(), running);
+    }
+
+    // Background tasks from the file-based registry (Pending/Running count
+    // as active — the same buckets `mimi task list` highlights).
+    let task_list = tasks::list();
+    if !task_list.is_empty() {
+        let active = task_list
+            .iter()
+            .filter(|t| matches!(t.status, tasks::Status::Running | tasks::Status::Pending))
+            .count();
+        let prefix = if agents.is_empty() { "\n" } else { "" };
+        println!("{}  Tasks:        {} total, {} active", prefix, task_list.len(), active);
     }
 
     // Memory files
