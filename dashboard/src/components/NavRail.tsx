@@ -1,3 +1,5 @@
+import { useEffect } from 'react'
+
 export type View = 'home' | 'brain' | 'memory' | 'channels' | 'crons' | 'secrets' | 'logs' | 'services' | 'nutrition' | 'tasks' | 'subagents' | 'settings'
 
 const navItems: { id: View; label: string; cmd: string }[] = [
@@ -18,8 +20,31 @@ const navItems: { id: View; label: string; cmd: string }[] = [
 /**
  * Top terminal-style nav. Fixed, full-width, one row of lowercase text
  * with pipe separators — feels like a status bar at the top of a TUI.
+ *
+ * Single-key shortcuts: pressing the bracketed letter on any view jumps
+ * there (e.g. `t` → tasks). Suppressed while typing in an input/textarea
+ * or when a modifier key is held, so it never fights with browser/native
+ * shortcuts.
  */
 export function NavRail({ active, onChange }: { active: View; onChange: (v: View) => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return
+      const target = e.target as HTMLElement | null
+      if (target) {
+        const tag = target.tagName
+        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable) return
+      }
+      const key = e.key.toLowerCase()
+      const match = navItems.find(n => n.cmd === key)
+      if (!match) return
+      e.preventDefault()
+      onChange(match.id)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onChange])
+
   return (
     <nav
       className="fixed top-0 left-0 right-0 z-50"
@@ -34,12 +59,13 @@ export function NavRail({ active, onChange }: { active: View; onChange: (v: View
           <span className="font-semibold tracking-wider uppercase">mimi</span>
           <span className="text-muted-foreground text-[10px]">v1</span>
         </span>
-        {navItems.map(({ id, label }) => {
+        {navItems.map(({ id, label, cmd }) => {
           const isActive = active === id
           return (
             <button
               key={id}
               onClick={() => onChange(id)}
+              title={`shortcut: ${cmd}`}
               className="relative tracking-wide transition-colors py-1"
               style={{
                 color: isActive ? 'var(--foreground)' : 'var(--muted-foreground)',
@@ -49,6 +75,12 @@ export function NavRail({ active, onChange }: { active: View; onChange: (v: View
             >
               {isActive && <span style={{ color: 'var(--accentphosphor)', marginRight: 6 }}>&gt;</span>}
               {label}
+              <span
+                className="ml-1.5 text-[10px] opacity-60"
+                style={{ color: isActive ? 'var(--accentphosphor)' : undefined }}
+              >
+                [{cmd}]
+              </span>
             </button>
           )
         })}
