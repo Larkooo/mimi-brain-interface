@@ -423,7 +423,12 @@ async fn main() {
                     std::process::exit(1);
                 }
             }
-            ChannelCommands::Remove { name } => commands::channel::remove(&name),
+            ChannelCommands::Remove { name } => {
+                if let Err(e) = commands::channel::remove(&name) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            }
         },
         Some(Commands::Plugin { args }) => {
             let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
