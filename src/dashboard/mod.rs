@@ -417,7 +417,7 @@ async fn api_mcp_list() -> Result<Json<serde_json::Value>, (StatusCode, String)>
 // --- Backup ---
 
 async fn api_backup() -> Json<serde_json::Value> {
-    commands::backup::run();
+    commands::backup::run(None);
     Json(serde_json::json!({ "ok": true }))
 }
 
