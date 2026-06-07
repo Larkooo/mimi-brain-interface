@@ -23,6 +23,9 @@ export function CronsView() {
   const [customSchedule, setCustomSchedule] = useState('')
   const [prompt, setPrompt] = useState('')
   const [description, setDescription] = useState('')
+  const [toast, setToast] = useState<string | null>(null)
+
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(null), 2500) }
 
   const refresh = useCallback(async () => {
     try { setCrons(await getCrons()) } catch {}
@@ -33,20 +36,27 @@ export function CronsView() {
   const handleCreate = async () => {
     const sched = schedule || customSchedule
     if (!name.trim() || !sched.trim() || !prompt.trim()) return
-    await createCron(name, sched, prompt, description)
-    setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
-    setAdding(false)
-    refresh()
+    try {
+      await createCron(name, sched, prompt, description)
+      setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
+      setAdding(false)
+      refresh()
+    } catch (e) { flash(`create failed: ${String(e)}`) }
   }
 
-  const handleDelete = async (id: string) => {
-    await deleteCron(id)
-    refresh()
+  const handleDelete = async (id: string, jobName: string) => {
+    if (!window.confirm(`Delete cron "${jobName}"? This cannot be undone.`)) return
+    try {
+      await deleteCron(id)
+      refresh()
+    } catch (e) { flash(`delete failed: ${String(e)}`) }
   }
 
   const handleToggle = async (id: string) => {
-    await toggleCron(id)
-    refresh()
+    try {
+      await toggleCron(id)
+      refresh()
+    } catch (e) { flash(`toggle failed: ${String(e)}`) }
   }
 
   return (
@@ -55,15 +65,18 @@ export function CronsView() {
         <div className="text-[12px] text-muted-foreground">
           {crons.length} {crons.length === 1 ? 'job' : 'jobs'} configured
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setAdding(!adding)}
-          className="h-8 px-3 text-[12px]"
-        >
-          <Plus size={13} className="mr-1.5" />
-          New schedule
-        </Button>
+        <div className="flex items-center gap-3">
+          {toast && <div className="text-[11px] text-muted-foreground">{toast}</div>}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setAdding(!adding)}
+            className="h-8 px-3 text-[12px]"
+          >
+            <Plus size={13} className="mr-1.5" />
+            New schedule
+          </Button>
+        </div>
       </div>
 
       {adding && (
@@ -166,7 +179,7 @@ export function CronsView() {
                   </button>
                   <button
                     className="p-1.5 rounded-md text-muted-foreground/60 hover:text-danger hover:bg-accent transition-colors"
-                    onClick={() => handleDelete(cron.id)}
+                    onClick={() => handleDelete(cron.id, cron.name)}
                     title="Delete"
                   >
                     <Trash2 size={13} />
