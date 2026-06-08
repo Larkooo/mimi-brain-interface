@@ -605,15 +605,17 @@ async fn api_secrets_set(Json(body): Json<SetSecretBody>)
     if body.name.is_empty() || body.value.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "name and value required".into()));
     }
-    commands::secret::set(&body.name, &body.value);
+    commands::secret::set(&body.name, &body.value)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "ok": true, "name": body.name })))
 }
 
 async fn api_secrets_delete(axum::extract::Path(name): axum::extract::Path<String>)
-    -> Json<serde_json::Value>
+    -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    commands::secret::delete(&name);
-    Json(serde_json::json!({ "ok": true }))
+    commands::secret::delete(&name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 // --- Logs ---
