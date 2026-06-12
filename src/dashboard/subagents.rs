@@ -330,8 +330,21 @@ pub async fn api_delete(Path(id): Path<String>) -> Result<Json<Value>, (StatusCo
 
 // ---------- SSE: live stream.jsonl tail ----------
 
+/// Number of post-terminal poll ticks (at 500ms each) to keep draining
+/// stream.jsonl before closing the SSE. Catches any trailing events the
+/// supervisor flushed around the same instant it flipped meta.status to a
+/// terminal value, then lets the connection close so the client and server
+/// both stop polling a finished agent forever.
+const GRACE_TICKS_AFTER_TERMINAL: u8 = 4;
+
+fn is_terminal_status(s: &str) -> bool {
+    matches!(s, "completed" | "failed" | "killed")
+}
+
 /// Tail stream.jsonl, emit each new line as an SSE event with the parsed
-/// (and redacted) JSON. Closes when the client disconnects.
+/// (and redacted) JSON. Closes when the client disconnects, or shortly
+/// after the agent reaches a terminal state — without the latter, every
+/// detail panel opened on a finished agent kept polling metadata forever.
 pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let dir = subagents::agent_dir(&id);
     let stream_path = dir.join("stream.jsonl");
@@ -352,46 +365,79 @@ pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result
             Err(_) => 0,
         };
         let mut interval = tokio::time::interval(Duration::from_millis(500));
+        // Once we observe a terminal status we count down a short grace
+        // window — any trailing events the supervisor wrote right around
+        // the meta-flip are still delivered, then the stream closes.
+        let mut terminal_grace: Option<u8> = None;
         loop {
             interval.tick().await;
             let len = match std::fs::metadata(&stream_path) {
                 Ok(m) => m.len(),
-                Err(_) => { continue; }
+                Err(_) => {
+                    // Agent dir gone (deleted). If we'd already started
+                    // shutting down, finish; otherwise just keep polling.
+                    if terminal_grace.is_some() { break; }
+                    continue;
+                }
             };
             if len < pos {
                 // file truncated/rotated — restart from 0.
                 pos = 0;
             }
-            if len == pos { continue; }
-            // Read [pos..len] and emit lines.
-            use std::io::{Read, Seek, SeekFrom};
-            let mut f = match std::fs::File::open(&stream_path) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            if f.seek(SeekFrom::Start(pos)).is_err() { continue; }
-            let mut buf = vec![0u8; (len - pos) as usize];
-            if f.read_exact(&mut buf).is_err() { continue; }
-            pos = len;
-            let text = String::from_utf8_lossy(&buf).to_string();
-            for line in text.lines() {
-                if line.trim().is_empty() { continue; }
-                if let Ok(mut v) = serde_json::from_str::<Value>(line) {
-                    redact_value(&mut v);
-                    if let Ok(s) = serde_json::to_string(&v) {
-                        yield Ok(Event::default().event("event").data(s));
+            if len > pos {
+                // Read [pos..len] and emit lines.
+                use std::io::{Read, Seek, SeekFrom};
+                let mut f = match std::fs::File::open(&stream_path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                if f.seek(SeekFrom::Start(pos)).is_err() { continue; }
+                let mut buf = vec![0u8; (len - pos) as usize];
+                if f.read_exact(&mut buf).is_err() { continue; }
+                pos = len;
+                let text = String::from_utf8_lossy(&buf).to_string();
+                for line in text.lines() {
+                    if line.trim().is_empty() { continue; }
+                    if let Ok(mut v) = serde_json::from_str::<Value>(line) {
+                        redact_value(&mut v);
+                        if let Ok(s) = serde_json::to_string(&v) {
+                            yield Ok(Event::default().event("event").data(s));
+                        }
+                    }
+                }
+                // Also emit a status snapshot so the UI badges update.
+                if let Ok(meta) = subagents::read_meta(&id) {
+                    if let Ok(s) = serde_json::to_string(&serde_json::json!({
+                        "_status": meta.status,
+                        "_ended_at": meta.ended_at,
+                        "_exit_code": meta.exit_code,
+                    })) {
+                        yield Ok(Event::default().event("status").data(s));
                     }
                 }
             }
-            // Also emit a status snapshot so the UI badges update.
-            if let Ok(meta) = subagents::read_meta(&id) {
-                if let Ok(s) = serde_json::to_string(&serde_json::json!({
-                    "_status": meta.status,
-                    "_ended_at": meta.ended_at,
-                    "_exit_code": meta.exit_code,
-                })) {
-                    yield Ok(Event::default().event("status").data(s));
+
+            // Detect terminal state and wind the stream down. Done after
+            // the drain pass so the latest events are flushed first.
+            match terminal_grace {
+                None => {
+                    if let Ok(meta) = subagents::read_meta(&id) {
+                        if is_terminal_status(&meta.status) {
+                            // Make sure the UI sees the terminal status even
+                            // when the meta-flip happened on an idle tick.
+                            if let Ok(s) = serde_json::to_string(&serde_json::json!({
+                                "_status": meta.status,
+                                "_ended_at": meta.ended_at,
+                                "_exit_code": meta.exit_code,
+                            })) {
+                                yield Ok(Event::default().event("status").data(s));
+                            }
+                            terminal_grace = Some(GRACE_TICKS_AFTER_TERMINAL);
+                        }
+                    }
                 }
+                Some(0) => break,
+                Some(n) => terminal_grace = Some(n - 1),
             }
         }
     };
