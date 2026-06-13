@@ -1,7 +1,8 @@
-use crate::channels::discord;
+use crate::channels::{discord, telegram};
 use crate::context_buffer;
 use crate::paths;
 use std::process::Command;
+use std::str::FromStr;
 
 const REFLECT_PROMPT: &str = r#"You are Mimi's prefrontal cortex — a nightly "dreaming" cycle that audits Mimi's running inference context and consolidates it into persistent memory.
 
@@ -68,8 +69,12 @@ pub fn run() {
     // Drop restart markers so each bridge posts a "fresh after reflect"
     // ping into the most recently active channel on startup. Owner asked
     // to always be told when a restart happens.
-    if let Some(chan) = latest_channel("discord") {
-        let _ = discord::write_restart_marker(chan, Some("fresh context after nightly reflect 🌀"));
+    let restart_msg = "fresh context after nightly reflect 🌀";
+    if let Some(chan) = latest_channel::<u64>("discord") {
+        let _ = discord::write_restart_marker(chan, Some(restart_msg));
+    }
+    if let Some(chat) = latest_channel::<i64>("telegram") {
+        let _ = telegram::write_restart_marker(chat, Some(restart_msg));
     }
 
     println!("Restarting channel bridges for fresh context...");
@@ -89,8 +94,10 @@ pub fn run() {
 }
 
 /// Pick the chat_id of the most recent entry for `source` in the cross-channel
-/// context buffer. Returns `None` if nothing recent or the id can't be parsed.
-fn latest_channel(source: &str) -> Option<u64> {
+/// context buffer. Returns `None` if nothing recent or the id can't be parsed
+/// into the requested integer type. Telegram group chat ids are negative, so
+/// callers parameterize with `i64`; Discord channel ids fit in `u64`.
+fn latest_channel<T: FromStr>(source: &str) -> Option<T> {
     context_buffer::recent()
         .into_iter()
         .rev()
