@@ -1,4 +1,4 @@
-use crate::channels::discord;
+use crate::channels::{discord, telegram};
 use crate::context_buffer;
 use crate::paths;
 use std::process::Command;
@@ -71,6 +71,9 @@ pub fn run() {
     if let Some(chan) = latest_channel("discord") {
         let _ = discord::write_restart_marker(chan, Some("fresh context after nightly reflect 🌀"));
     }
+    if let Some(chat) = latest_telegram_chat() {
+        let _ = telegram::write_restart_marker(chat, Some("fresh context after nightly reflect 🌀"));
+    }
 
     println!("Restarting channel bridges for fresh context...");
     for service in ["mimi-discord", "mimi-telegram"] {
@@ -95,5 +98,15 @@ fn latest_channel(source: &str) -> Option<u64> {
         .into_iter()
         .rev()
         .find(|e| e.source == source)
+        .and_then(|e| e.chat_id.parse().ok())
+}
+
+/// Telegram variant — chat ids are `i64` (groups/supergroups are negative),
+/// so the u64-parsing `latest_channel` helper won't accept them.
+fn latest_telegram_chat() -> Option<i64> {
+    context_buffer::recent()
+        .into_iter()
+        .rev()
+        .find(|e| e.source == "telegram")
         .and_then(|e| e.chat_id.parse().ok())
 }
