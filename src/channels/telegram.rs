@@ -107,6 +107,10 @@ fn write_pidfile() -> Result<(), String> {
 }
 
 /// Send SIGTERM to a running telegram bot (reads pid from ~/.mimi/channels/telegram/pid).
+///
+/// If the recorded pid is already gone (ESRCH) — e.g. the bot crashed before
+/// we got here — treat it as a successful stop and clean up the stale pidfile,
+/// so the next `mimi channel start telegram` doesn't have to manually clear it.
 pub fn stop() -> Result<(), String> {
     let path = pidfile();
     let pid_str = std::fs::read_to_string(&path)
@@ -117,10 +121,15 @@ pub fn stop() -> Result<(), String> {
         .map_err(|e| format!("bad pid in {}: {e}", path.display()))?;
     let rc = unsafe { libc::kill(pid, libc::SIGTERM) };
     if rc != 0 {
-        return Err(format!("kill({pid}, SIGTERM) failed: errno {}", std::io::Error::last_os_error()));
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ESRCH) {
+            return Err(format!("kill({pid}, SIGTERM) failed: errno {err}"));
+        }
+        eprintln!("telegram: pid {pid} already gone — clearing stale pidfile");
+    } else {
+        eprintln!("telegram: SIGTERM sent to {pid}");
     }
     let _ = std::fs::remove_file(&path);
-    eprintln!("telegram: SIGTERM sent to {pid}");
     Ok(())
 }
 
