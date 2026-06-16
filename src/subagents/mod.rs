@@ -660,11 +660,22 @@ pub fn rm(id: &str) -> Result<(), String> {
 
 /// Read up to `limit` lines from the tail of stream.jsonl, parsing each as
 /// JSON. Returns parsed `Value`s in chronological order (oldest first).
+///
+/// Seeks from EOF and walks backwards in chunks so a multi-MB stream file
+/// doesn't have to be fully loaded just to render the last few events.
+/// `api_list` calls this once per subagent on every dashboard load, so
+/// `O(limit)` matters here.
 pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
     let dir = agent_dir(id);
     let path = stream_path(&dir);
-    let contents = fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = contents.lines().collect();
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let buf = read_tail_bytes(&path, limit).unwrap_or_default();
+    // We may have over-read into the middle of an earlier (partial) line at
+    // the start of `buf`; `lines()` + the `saturating_sub` trim handles that.
+    let text = String::from_utf8_lossy(&buf);
+    let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(limit);
     let mut out = Vec::new();
     for line in &lines[start..] {
@@ -674,6 +685,39 @@ pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
         }
     }
     Ok(out)
+}
+
+/// Read just enough bytes from the END of `path` to contain at least `limit`
+/// complete lines (plus one extra so the first line in the returned buffer is
+/// known to be complete). Reads 8 KiB at a time and keeps going if a single
+/// line spans multiple chunks. Returns the raw tail bytes (oldest-first
+/// within the slice).
+fn read_tail_bytes(path: &Path, limit: usize) -> std::io::Result<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = fs::File::open(path)?;
+    let total = file.seek(SeekFrom::End(0))?;
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+    // We want `limit` lines; read until we've seen `limit + 1` newlines so
+    // the first line in `buf` is guaranteed complete, or until we hit BOF.
+    let want_newlines = limit.saturating_add(1);
+    let chunk_size: u64 = 8 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    let mut pos = total;
+    while pos > 0 {
+        let read_size = chunk_size.min(pos);
+        pos -= read_size;
+        file.seek(SeekFrom::Start(pos))?;
+        let mut chunk = vec![0u8; read_size as usize];
+        file.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&buf);
+        buf = chunk;
+        if buf.iter().filter(|&&b| b == b'\n').count() >= want_newlines {
+            break;
+        }
+    }
+    Ok(buf)
 }
 
 // ---------- CLI surface (called from main.rs) ----------
