@@ -3,7 +3,6 @@ use std::fs;
 
 /// Known channel plugins and their Claude Code plugin identifiers
 const CHANNEL_PLUGINS: &[(&str, &str)] = &[
-    ("telegram", "telegram@claude-plugins-official"),
     ("discord", "discord@claude-plugins-official"),
     ("imessage", "imessage@claude-plugins-official"),
 ];
@@ -78,9 +77,9 @@ pub fn add(channel_type: &str) -> Result<(), String> {
     let config = match channel_type {
         "telegram" => serde_json::json!({
             "type": "telegram",
-            "plugin": plugin.unwrap_or(""),
+            "plugin": "mimi-native",
             "enabled": true,
-            "notes": "1. Get a bot token from @BotFather on Telegram\n2. Run: mimi channel configure telegram <bot_token>\n3. Relaunch mimi to connect"
+            "notes": "1. Get a bot token from @BotFather on Telegram\n2. Run: mimi channel configure telegram <bot_token>\n3. Token is stored in ~/.mimi/channels/telegram/.env\n4. Start with: mimi channel start telegram"
         }),
         "discord" => serde_json::json!({
             "type": "discord",
@@ -118,7 +117,8 @@ pub fn add(channel_type: &str) -> Result<(), String> {
 }
 
 /// Configure a channel with a bot token
-/// Writes the token to ~/.claude/channels/<type>/.env
+/// Telegram is a native Mimi bridge and stores config under ~/.mimi/channels/telegram/.
+/// Claude-plugin-backed channels keep their plugin config under ~/.claude/channels/<type>/.
 pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
     let env_var = match channel_type {
         "telegram" => "TELEGRAM_BOT_TOKEN",
@@ -128,16 +128,19 @@ pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
         }
     };
 
-    // Write to ~/.claude/channels/<type>/.env (where the Claude Code plugin expects it)
-    let claude_channel_dir = dirs::home_dir()
-        .expect("no home dir")
-        .join(".claude")
-        .join("channels")
-        .join(channel_type);
-    fs::create_dir_all(&claude_channel_dir)
-        .map_err(|e| format!("Failed to create channel directory {}: {}", claude_channel_dir.display(), e))?;
+    let channel_dir = if channel_type == "telegram" {
+        paths::channels_dir().join(channel_type)
+    } else {
+        dirs::home_dir()
+            .expect("no home dir")
+            .join(".claude")
+            .join("channels")
+            .join(channel_type)
+    };
+    fs::create_dir_all(&channel_dir)
+        .map_err(|e| format!("Failed to create channel directory {}: {}", channel_dir.display(), e))?;
 
-    let env_path = claude_channel_dir.join(".env");
+    let env_path = channel_dir.join(".env");
     fs::write(&env_path, format!("{}={}\n", env_var, token))
         .map_err(|e| format!("Failed to write bot token to {}: {}", env_path.display(), e))?;
 
@@ -165,4 +168,3 @@ pub fn remove(name: &str) {
         eprintln!("Channel '{}' not found.", name);
     }
 }
-
