@@ -64,21 +64,29 @@ pub async fn start() -> Result<(), String> {
 // --- Config / state ---
 
 fn load_token() -> Result<String, String> {
-    let path = dirs::home_dir()
-        .ok_or("no home dir")?
-        .join(".claude/channels/telegram/.env");
+    if let Ok(token) = std::env::var("TELEGRAM_BOT_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    let path = channel_dir().join(".env");
     let contents = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("TELEGRAM_BOT_TOKEN=") {
-            return Ok(v.trim().to_string());
+            let token = v.trim().trim_matches('"');
+            if !token.is_empty() {
+                return Ok(token.to_string());
+            }
         }
     }
-    Err(format!("TELEGRAM_BOT_TOKEN not found in {}", path.display()))
+    Err(format!("TELEGRAM_BOT_TOKEN not configured in env or {}", path.display()))
 }
 
 fn load_allowlist() -> Option<HashSet<i64>> {
-    let path = dirs::home_dir()?.join(".claude/channels/telegram/access.json");
+    let path = channel_dir().join("access.json");
     let contents = std::fs::read_to_string(&path).ok()?;
     let v: Value = serde_json::from_str(&contents).ok()?;
     let ids = v.get("allowFrom")?.as_array()?;
