@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::process::Command;
 
 const AUDIT_PROMPT: &str = r#"You are Mimi's self-improvement agent. Your job is to audit Mimi's own codebase and propose improvements.
@@ -30,17 +31,44 @@ Rules:
 
 Start by exploring the codebase, then pick the single highest-impact improvement."#;
 
+/// How many prior audit branches to surface in the prompt. ~20 covers roughly
+/// three weeks of nightly runs — long enough to dodge clear duplicates,
+/// short enough that the prompt stays readable.
+const RECENT_AUDIT_LIMIT: usize = 20;
+
 pub fn run() {
     // Find the repo directory
     let repo_dir = find_repo_dir();
 
+    // Refresh remote refs so the recent-audit list isn't stale on machines
+    // that haven't fetched in a while. Restricted to the audit-branch
+    // refspec to keep this cheap and avoid touching anything else.
+    let _ = Command::new("git")
+        .args([
+            "fetch",
+            "--quiet",
+            "origin",
+            "+refs/heads/mimi/audit-*:refs/remotes/origin/mimi/audit-*",
+        ])
+        .current_dir(&repo_dir)
+        .output();
+
+    let recent = recent_audit_titles(&repo_dir, RECENT_AUDIT_LIMIT);
+    let prompt = build_prompt(&recent);
+
     println!("Running self-audit on codebase...\n");
+    if !recent.is_empty() {
+        println!(
+            "Surfacing {} prior audit titles in the prompt to avoid duplicate work.\n",
+            recent.len()
+        );
+    }
 
     let status = Command::new("claude")
         .args([
             "--print",
             "--dangerously-skip-permissions",
-            AUDIT_PROMPT,
+            &prompt,
         ])
         .current_dir(&repo_dir)
         .status()
@@ -52,6 +80,54 @@ pub fn run() {
         eprintln!("Audit failed.");
         std::process::exit(1);
     }
+}
+
+/// Build the prompt text passed to claude. Appends a `## Recent audit branches`
+/// section when prior audits exist so the agent picks something orthogonal
+/// instead of re-proposing variants of the same fix.
+fn build_prompt(recent: &[(String, String)]) -> String {
+    if recent.is_empty() {
+        return AUDIT_PROMPT.to_string();
+    }
+    let mut s = String::with_capacity(AUDIT_PROMPT.len() + 1024);
+    s.push_str(AUDIT_PROMPT);
+    s.push_str("\n\n## Recent audit branches (do NOT repropose these — pick something orthogonal):\n");
+    for (date, title) in recent {
+        s.push_str(&format!("- {date}: {title}\n"));
+    }
+    s
+}
+
+/// Collect tip-commit subjects of the most recent `origin/mimi/audit-*`
+/// branches, sorted newest first. Returns `(date, subject)` pairs where
+/// `date` is the suffix on the branch name (e.g. `2026-06-18`).
+fn recent_audit_titles(repo: &Path, limit: usize) -> Vec<(String, String)> {
+    let out = Command::new("git")
+        .args([
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname:short)|%(subject)",
+            "refs/remotes/origin/mimi/audit-*",
+        ])
+        .current_dir(repo)
+        .output();
+    let stdout = match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        _ => return Vec::new(),
+    };
+    stdout
+        .lines()
+        .take(limit)
+        .filter_map(|line| {
+            let (refname, subject) = line.split_once('|')?;
+            let date = refname
+                .rsplit('/')
+                .next()?
+                .trim_start_matches("audit-")
+                .to_string();
+            Some((date, subject.to_string()))
+        })
+        .collect()
 }
 
 pub fn find_repo_dir() -> std::path::PathBuf {
