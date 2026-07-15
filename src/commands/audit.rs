@@ -1,8 +1,12 @@
+use std::path::Path;
 use std::process::Command;
 
 const AUDIT_PROMPT: &str = r#"You are Mimi's self-improvement agent. Your job is to audit Mimi's own codebase and propose improvements.
 
 You are in the mimi-brain-interface repository. This is Mimi's brain interface — the Rust CLI and React dashboard that manages an autonomous AI assistant.
+
+The repo is already synced to the latest origin/master before you start, so
+HEAD is master. Create your audit branch off the current HEAD.
 
 Your task:
 1. Read through the codebase (src/, dashboard/src/, CLAUDE.md.template, Cargo.toml)
@@ -34,6 +38,17 @@ pub fn run() {
     // Find the repo directory
     let repo_dir = find_repo_dir();
 
+    // Ensure every audit starts from a clean origin/master. Without this, the
+    // nightly cron can end up creating today's audit branch on top of an
+    // unmerged previous audit branch — stacking PRs and mixing yesterday's
+    // proposal into today's diff.
+    println!("Syncing repo to origin/master before audit...");
+    if let Err(e) = sync_to_master(&repo_dir) {
+        eprintln!("Error: {e}");
+        eprintln!("Aborting audit — refusing to run on a stale or dirty base.");
+        std::process::exit(1);
+    }
+
     println!("Running self-audit on codebase...\n");
 
     let status = Command::new("claude")
@@ -51,6 +66,31 @@ pub fn run() {
     } else {
         eprintln!("Audit failed.");
         std::process::exit(1);
+    }
+}
+
+/// Fetch and hard-reset the working tree to `origin/master` so the audit
+/// always builds its branch from the latest published mainline.
+fn sync_to_master(repo: &Path) -> Result<(), String> {
+    git(repo, &["fetch", "origin", "master"])
+        .map_err(|e| format!("git fetch origin master failed: {e}"))?;
+    git(repo, &["checkout", "master"])
+        .map_err(|e| format!("git checkout master failed: {e}"))?;
+    git(repo, &["reset", "--hard", "origin/master"])
+        .map_err(|e| format!("git reset --hard origin/master failed: {e}"))?;
+    Ok(())
+}
+
+fn git(repo: &Path, args: &[&str]) -> Result<(), String> {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .status()
+        .map_err(|e| format!("failed to spawn git: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("git {} exited with status {}", args.join(" "), status))
     }
 }
 
