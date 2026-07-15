@@ -416,9 +416,20 @@ async fn api_mcp_list() -> Result<Json<serde_json::Value>, (StatusCode, String)>
 
 // --- Backup ---
 
-async fn api_backup() -> Json<serde_json::Value> {
-    commands::backup::run();
-    Json(serde_json::json!({ "ok": true }))
+async fn api_backup() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // Run the (potentially slow) tar in a blocking worker so we don't stall
+    // the async runtime. The previous version called `commands::backup::run()`
+    // directly, which on failure called `std::process::exit(1)` — pressing
+    // the backup button in the dashboard could kill the dashboard server.
+    let report = tokio::task::spawn_blocking(commands::backup::run)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("backup task panicked: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "archive": report.archive.display().to_string(),
+        "size_bytes": report.size_bytes,
+    })))
 }
 
 // --- Memory ---
