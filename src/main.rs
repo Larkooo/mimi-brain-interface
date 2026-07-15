@@ -53,7 +53,12 @@ enum Commands {
     /// Edit Mimi's config
     Config,
     /// Backup ~/.mimi/ data
-    Backup,
+    Backup {
+        /// Number of most-recent backups to keep (older ones are pruned).
+        /// Defaults to 14 — roughly two weeks of nightly snapshots.
+        #[arg(short, long)]
+        keep: Option<usize>,
+    },
     /// Run a self-reflection cycle (prefrontal cortex)
     Reflect,
     /// Audit own codebase and propose improvements via PR
@@ -430,7 +435,7 @@ async fn main() {
             claude::plugin(&refs);
         }
         Some(Commands::Config) => commands::config::run(),
-        Some(Commands::Backup) => commands::backup::run(),
+        Some(Commands::Backup { keep }) => commands::backup::run(keep),
         Some(Commands::Reflect) => commands::reflect::run(),
         Some(Commands::Audit) => commands::audit::run(),
         Some(Commands::Update) => commands::update::run(),
