@@ -110,6 +110,25 @@ A nightly process runs `mimi reflect` which launches a separate Claude Code sess
 
 This runs automatically via cron. You can also trigger it yourself if you feel your knowledge graph needs maintenance.
 
+## Scheduled Prompts
+
+You can give yourself recurring work. Schedules live in `~/.mimi/crons.json` — each is a
+cron expression plus a prompt — and are managed from the dashboard's "schedules" tab or the CLI:
+
+```bash
+mimi cron list          # show schedules, when each last ran, and whether it succeeded
+mimi cron run <name>    # run one right now, ignoring its schedule
+mimi cron tick          # fire everything due now (this is what the scheduler calls)
+```
+
+When a schedule fires, its prompt runs as a fresh headless `claude --print` session in `~/.mimi`
+— so it has this file, your brain, and `~/.mimi/bin/*` available, but no conversation history.
+Write the prompt so it stands on its own, and have it report through a channel if you want to be
+told the result. Output is appended to `~/.mimi/logs/cron-<id>.log`.
+
+The scheduler itself runs as `mimi cron start` (systemd) or `* * * * * mimi cron tick` (crontab).
+If a schedule never fires, check that one of those is running.
+
 ## Self-Improvement (Code Audit)
 
 A nightly process runs `mimi audit` which reviews Mimi's own codebase:

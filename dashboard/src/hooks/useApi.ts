@@ -183,6 +183,10 @@ export interface CronJob {
   prompt: string;
   description: string;
   enabled: boolean;
+  /** RFC3339 UTC timestamp of the last run, or null if it has never fired. */
+  last_run: string | null;
+  /** "ok" or "failed: …" from the last run. */
+  last_status: string | null;
 }
 
 export async function getCrons(): Promise<CronJob[]> {
