@@ -44,6 +44,20 @@ claude plugin install <name>
 claude plugin list
 ```
 
+### Schedules (recurring prompts)
+
+You can give yourself standing orders. Schedules live in `~/.mimi/crons.json` — each is a
+name, a 5-field cron expression, and a prompt that gets run as `claude --print` in `~/.mimi`.
+Add them from the dashboard's schedules view, or inspect them from the CLI:
+
+```bash
+mimi cron list              # schedules with next/last run
+mimi cron trigger <id>      # fire one now, without waiting for its slot
+```
+
+The `mimi cron run` daemon is what actually fires them (systemd unit `mimi-cron`).
+If a schedule shows no "last run" long after its slot passed, that daemon isn't running.
+
 ### Your Dashboard
 A web dashboard runs at the configured port (default 3131) for remote management.
 The dashboard is managed by the `mimi` CLI — you don't need to touch it directly.

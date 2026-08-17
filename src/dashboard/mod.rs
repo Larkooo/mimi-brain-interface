@@ -505,38 +505,54 @@ async fn api_memory_file(
 }
 
 // --- Crons ---
+//
+// Storage and scheduling live in crate::crons; this is just the HTTP surface.
+// The list response merges in each job's last run so the UI can show whether
+// the scheduler is actually firing it.
 
-#[derive(Serialize, Deserialize, Clone)]
-struct CronJob {
-    id: String,
-    name: String,
-    schedule: String,
-    prompt: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default = "crons_default_enabled")]
-    enabled: bool,
+use crate::crons::{self, CronJob};
+
+/// A job plus the outcome of its most recent run.
+#[derive(Serialize)]
+struct CronJobView {
+    #[serde(flatten)]
+    job: CronJob,
+    last_run: Option<String>,
+    last_status: Option<String>,
+    last_duration_ms: Option<u64>,
+    /// `null` when the expression is invalid or can never match again.
+    next_run: Option<String>,
+    /// Set when the cron expression fails to parse, so the UI can flag it.
+    schedule_error: Option<String>,
 }
 
-fn crons_default_enabled() -> bool { true }
-
-fn crons_path() -> std::path::PathBuf {
-    paths::home().join("crons.json")
+async fn api_crons_list() -> Json<Vec<CronJobView>> {
+    let state = crons::load_state();
+    let now = chrono::Local::now();
+    let views = crons::load_jobs()
+        .into_iter()
+        .map(|job| {
+            let run = state.get(&job.id);
+            let (next_run, schedule_error) = match crons::Schedule::parse(&job.schedule) {
+                Ok(schedule) if job.enabled => (
+                    schedule.next_after(now).map(|t| t.to_rfc3339()),
+                    None,
+                ),
+                Ok(_) => (None, None),
+                Err(e) => (None, Some(e)),
+            };
+            CronJobView {
+                last_run: run.and_then(|r| r.last_run.clone()),
+                last_status: run.and_then(|r| r.last_status.clone()),
+                last_duration_ms: run.and_then(|r| r.last_duration_ms),
+                next_run,
+                schedule_error,
+                job,
+            }
+        })
+        .collect();
+    Json(views)
 }
-
-fn load_crons() -> Vec<CronJob> {
-    fs::read_to_string(crons_path())
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
-}
-
-fn save_crons(crons: &[CronJob]) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(crons).map_err(|e| e.to_string())?;
-    fs::write(crons_path(), json).map_err(|e| e.to_string())
-}
-
-async fn api_crons_list() -> Json<Vec<CronJob>> { Json(load_crons()) }
 
 #[derive(Deserialize)]
 struct CreateCronBody { name: String, schedule: String, prompt: String, #[serde(default)] description: String }
@@ -544,7 +560,11 @@ struct CreateCronBody { name: String, schedule: String, prompt: String, #[serde(
 async fn api_crons_create(Json(body): Json<CreateCronBody>)
     -> Result<Json<CronJob>, (StatusCode, String)>
 {
-    let mut crons = load_crons();
+    // Reject expressions the scheduler can't run — otherwise the job would sit
+    // in the list looking healthy and never fire.
+    crons::Schedule::parse(&body.schedule)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid schedule: {e}")))?;
+    let mut jobs = crons::load_jobs();
     let job = CronJob {
         id: format!("{}", chrono::Utc::now().timestamp_millis()),
         name: body.name,
@@ -553,33 +573,34 @@ async fn api_crons_create(Json(body): Json<CreateCronBody>)
         description: body.description,
         enabled: true,
     };
-    crons.push(job.clone());
-    save_crons(&crons).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    jobs.push(job.clone());
+    crons::save_jobs(&jobs).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(job))
 }
 
 async fn api_crons_delete(axum::extract::Path(id): axum::extract::Path<String>)
     -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    let mut crons = load_crons();
-    let len_before = crons.len();
-    crons.retain(|c| c.id != id);
-    if crons.len() == len_before {
+    let mut jobs = crons::load_jobs();
+    let len_before = jobs.len();
+    jobs.retain(|c| c.id != id);
+    if jobs.len() == len_before {
         return Err((StatusCode::NOT_FOUND, format!("cron {id} not found")));
     }
-    save_crons(&crons).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crons::save_jobs(&jobs).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crons::prune_state(&jobs);
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn api_crons_toggle(axum::extract::Path(id): axum::extract::Path<String>)
     -> Result<Json<serde_json::Value>, (StatusCode, String)>
 {
-    let mut crons = load_crons();
-    let job = crons.iter_mut().find(|c| c.id == id)
+    let mut jobs = crons::load_jobs();
+    let job = jobs.iter_mut().find(|c| c.id == id)
         .ok_or((StatusCode::NOT_FOUND, format!("cron {id} not found")))?;
     job.enabled = !job.enabled;
     let enabled = job.enabled;
-    save_crons(&crons).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    crons::save_jobs(&jobs).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     Ok(Json(serde_json::json!({ "ok": true, "enabled": enabled })))
 }
 
@@ -625,6 +646,7 @@ const LOG_FILES: &[(&str, &str)] = &[
     ("audit", "/tmp/mimi-audit.log"),
     ("reflect", "/tmp/mimi-reflect.log"),
     ("dashboard", "/tmp/mimi-dashboard.log"),
+    ("cron", "/tmp/mimi-cron.log"),
 ];
 
 #[derive(Serialize)]
