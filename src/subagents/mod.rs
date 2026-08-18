@@ -661,19 +661,67 @@ pub fn rm(id: &str) -> Result<(), String> {
 /// Read up to `limit` lines from the tail of stream.jsonl, parsing each as
 /// JSON. Returns parsed `Value`s in chronological order (oldest first).
 pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
-    let dir = agent_dir(id);
-    let path = stream_path(&dir);
-    let contents = fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(limit);
-    let mut out = Vec::new();
-    for line in &lines[start..] {
-        if line.trim().is_empty() { continue; }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
-            out.push(v);
-        }
+    let path = stream_path(&agent_dir(id));
+    Ok(tail_lines(&path, limit)
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .collect())
+}
+
+/// Last `limit` lines of `path`, read by seeking backwards from the end.
+/// Returns an empty vec if the file is missing or unreadable.
+///
+/// stream.jsonl is append-only and unbounded — with `--include-partial-messages`
+/// claude emits a line per token delta, so a long-running agent's stream reaches
+/// hundreds of megabytes. `GET /api/subagents` tails every agent on each 5s
+/// dashboard poll, so slurping whole files here is not affordable.
+///
+/// Bytes are decoded lossily on purpose: the supervisor tees claude's stdout in
+/// raw 8 KiB chunks (see `supervise`), so a multi-byte character can be split
+/// across a flush boundary. A strict UTF-8 decode fails on that transient state
+/// and would blank the entire event list.
+fn tail_lines(path: &Path, limit: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    // Start small — the common case (a handful of lines) is satisfied by one
+    // read — and double until we have enough lines or hit the ceiling.
+    const INITIAL_WINDOW: u64 = 64 * 1024;
+    const MAX_WINDOW: u64 = 8 * 1024 * 1024;
+
+    if limit == 0 {
+        return Vec::new();
     }
-    Ok(out)
+    let Ok(mut file) = fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(len) = file.metadata().map(|m| m.len()) else {
+        return Vec::new();
+    };
+
+    let mut window = INITIAL_WINDOW;
+    loop {
+        let start = len.saturating_sub(window);
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return Vec::new();
+        }
+        let mut buf = Vec::new();
+        if Read::by_ref(&mut file).take(len - start).read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+
+        let text = String::from_utf8_lossy(&buf);
+        // Unless we read from the very start, the first line is a fragment of
+        // whatever line straddles the window boundary — drop it.
+        let skip_partial = usize::from(start > 0);
+        let lines: Vec<&str> = text.lines().skip(skip_partial).collect();
+
+        if lines.len() >= limit || start == 0 || window >= MAX_WINDOW {
+            let skip = lines.len().saturating_sub(limit);
+            return lines[skip..].iter().map(|s| s.to_string()).collect();
+        }
+        window = (window * 2).min(MAX_WINDOW);
+    }
 }
 
 // ---------- CLI surface (called from main.rs) ----------
@@ -871,4 +919,74 @@ fn render_event_preview(v: &Value) -> String {
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() }
     else { format!("{}…", s.chars().take(n).collect::<String>()) }
+}
+
+#[cfg(test)]
+mod tail_tests {
+    use super::tail_lines;
+    use std::fs;
+    use std::path::PathBuf;
+
+    /// Unique scratch path per test — no tempfile dep in this crate.
+    fn scratch(tag: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!("mimi-tail-{tag}-{}", std::process::id()));
+        let _ = fs::remove_file(&path);
+        path
+    }
+
+    /// What the old full-slurp implementation returned, as a reference.
+    fn naive_tail(path: &PathBuf, limit: usize) -> Vec<String> {
+        let contents = fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<&str> = contents.lines().collect();
+        let start = lines.len().saturating_sub(limit);
+        lines[start..].iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn matches_naive_across_window_boundaries() {
+        let path = scratch("naive");
+        // ~200 bytes/line × 2000 lines ≈ 400 KiB, so limit=1000 needs more
+        // than the 64 KiB initial window and exercises the doubling loop.
+        let body: String = (0..2000)
+            .map(|i| format!("{{\"n\":{i},\"pad\":\"{}\"}}\n", "x".repeat(180)))
+            .collect();
+        fs::write(&path, &body).unwrap();
+
+        for limit in [1, 5, 200, 1000, 2000, 5000] {
+            assert_eq!(
+                tail_lines(&path, limit),
+                naive_tail(&path, limit),
+                "mismatch at limit={limit}"
+            );
+        }
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn keeps_complete_lines_when_tail_is_invalid_utf8() {
+        let path = scratch("utf8");
+        // The supervisor tees claude's stdout in raw 8 KiB chunks, so the file
+        // can transiently end mid-character. read_to_string would fail here and
+        // blank the whole event list; a lossy decode keeps the good lines.
+        let mut bytes = b"{\"a\":1}\n{\"b\":2}\n".to_vec();
+        bytes.push(0xE2); // leading byte of a 3-byte sequence, rest not flushed
+        fs::write(&path, &bytes).unwrap();
+
+        let lines = tail_lines(&path, 10);
+        assert!(fs::read_to_string(&path).is_err(), "fixture should not be valid UTF-8");
+        assert_eq!(lines[0], "{\"a\":1}");
+        assert_eq!(lines[1], "{\"b\":2}");
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn handles_empty_and_missing_files() {
+        let path = scratch("empty");
+        assert!(tail_lines(&path, 10).is_empty(), "missing file");
+        fs::write(&path, b"").unwrap();
+        assert!(tail_lines(&path, 10).is_empty(), "empty file");
+        fs::write(&path, b"{\"a\":1}\n").unwrap();
+        assert!(tail_lines(&path, 0).is_empty(), "zero limit");
+        fs::remove_file(&path).unwrap();
+    }
 }
