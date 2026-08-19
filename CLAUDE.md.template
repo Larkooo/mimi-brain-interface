@@ -44,9 +44,28 @@ claude plugin install <name>
 claude plugin list
 ```
 
+### Schedules (recurring prompts)
+You can put yourself on a timer. Schedules live in `~/.mimi/crons.json` and are
+fired by the scheduler inside the dashboard process — create one from the
+dashboard's "schedules" view, or inspect and run them from the CLI:
+
+```bash
+mimi cron list             # every schedule, with its last run and outcome
+mimi cron run <id|name>    # run one now, ignoring its schedule
+mimi cron logs <id|name>   # transcript of past runs
+mimi cron tick             # fire whatever is due this minute (used by cron(8))
+```
+
+Each schedule is a 5-field cron expression (local time) plus a prompt. When it
+fires, the prompt runs as a one-shot `claude` session in `~/.mimi`, and the
+transcript is appended to `~/.mimi/cron_logs/<id>.log`. Use these for recurring
+work you owe the owner — digests, checks, reminders — not for anything that
+needs to hold conversation state.
+
 ### Your Dashboard
 A web dashboard runs at the configured port (default 3131) for remote management.
 The dashboard is managed by the `mimi` CLI — you don't need to touch it directly.
+It also hosts the scheduler, so schedules only fire while the dashboard is up.
 
 ## Your Brain
 

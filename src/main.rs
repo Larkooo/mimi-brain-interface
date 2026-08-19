@@ -3,6 +3,7 @@ mod channels;
 mod claude;
 mod commands;
 mod context_buffer;
+mod crons;
 mod dashboard;
 mod paths;
 mod subagents;
@@ -79,6 +80,29 @@ enum Commands {
     Subagent {
         #[command(subcommand)]
         command: SubagentCommands,
+    },
+    /// Inspect and run the scheduled prompts configured in the dashboard
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// List configured schedules with their last run
+    List,
+    /// Evaluate every schedule against the current minute and fire what is due
+    Tick,
+    /// Run one schedule now, ignoring its cron expression and enabled flag
+    Run {
+        /// Schedule id or name
+        id: String,
+    },
+    /// Print a schedule's accumulated run log
+    Logs {
+        /// Schedule id or name
+        id: String,
     },
 }
 
@@ -481,6 +505,12 @@ async fn main() {
             SubagentCommands::Tail { id } => subagents::cli_tail(&id),
             SubagentCommands::Stop { id } => subagents::cli_stop(&id),
             SubagentCommands::Rm { id } => subagents::cli_rm(&id),
+        },
+        Some(Commands::Cron { command }) => match command {
+            CronCommands::List => crons::cli_list(),
+            CronCommands::Tick => crons::cli_tick().await,
+            CronCommands::Run { id } => crons::cli_run(&id).await,
+            CronCommands::Logs { id } => crons::cli_logs(&id),
         },
     }
 }
