@@ -7,6 +7,8 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -237,6 +239,7 @@ async fn spawn_claude(session_id: &str) -> Result<tokio::process::Child, String>
 
 struct UserTurn {
     text: String,
+    images: Vec<InlineImage>,
     chat_id: i64,
 }
 
@@ -253,9 +256,28 @@ async fn feed_claude(
 ) {
     while let Some(turn) = rx.recv().await {
         let _ = typing_tx.send(TypingCmd::Start(turn.chat_id)).await;
+        // Same shape as discord.rs::feed_claude — a turn carrying images
+        // becomes a content-block array instead of a bare string.
+        let content_val = if turn.images.is_empty() {
+            Value::String(turn.text)
+        } else {
+            let mut blocks: Vec<Value> = Vec::with_capacity(turn.images.len() + 1);
+            blocks.push(json!({ "type": "text", "text": turn.text }));
+            for img in turn.images {
+                blocks.push(json!({
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": img.media_type,
+                        "data": img.data_b64,
+                    }
+                }));
+            }
+            Value::Array(blocks)
+        };
         let payload = json!({
             "type": "user",
-            "message": { "role": "user", "content": turn.text }
+            "message": { "role": "user", "content": content_val }
         });
         let line = format!("{}\n", payload);
         if let Err(e) = stdin.write_all(line.as_bytes()).await {
@@ -375,6 +397,31 @@ struct TgMessage {
     chat: TgChat,
     from: Option<TgUser>,
     text: Option<String>,
+    // Media messages carry their text in `caption`, never in `text`.
+    caption: Option<String>,
+    photo: Option<Vec<TgPhotoSize>>,
+    document: Option<TgFile>,
+    voice: Option<TgFile>,
+    video: Option<TgFile>,
+    audio: Option<TgFile>,
+}
+
+/// One resolution of a photo. Telegram sends the same image several times at
+/// different sizes; the largest one is last.
+#[derive(Deserialize)]
+struct TgPhotoSize {
+    file_id: String,
+    file_size: Option<u64>,
+}
+
+/// Shared shape of `document` / `voice` / `video` / `audio`. Voice and video
+/// notes have no `file_name`, so every field past `file_id` is optional.
+#[derive(Deserialize)]
+struct TgFile {
+    file_id: String,
+    file_name: Option<String>,
+    mime_type: Option<String>,
+    file_size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -391,6 +438,216 @@ struct TgUser {
     username: Option<String>,
     #[serde(default)]
     first_name: Option<String>,
+}
+
+// --- Inbound media ---
+//
+// Telegram has no flat attachments array like Discord: media arrives in typed
+// fields (`photo`, `document`, `voice`, `video`, `audio`) and is referenced by
+// a `file_id` that has to be resolved through `getFile` before it can be
+// downloaded. Images are inlined as base64 blocks on the turn; anything else
+// is dumped to /tmp and surfaced as `attachment_file_path` so mimi can Read it
+// — mirroring the conventions the discord bridge already established.
+
+/// Claude API caps inline images at 5MB each.
+const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
+/// Cap for files pulled to /tmp, so a fat video can't swallow memory or disk.
+/// (Telegram's own Bot API download limit is 20MB.)
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+struct InlineImage {
+    media_type: String,
+    data_b64: String,
+}
+
+/// The single downloadable file attached to an inbound message.
+struct Media {
+    file_id: String,
+    file_name: String,
+    mime_type: String,
+    file_size: Option<u64>,
+}
+
+fn claude_supported_image_mime(ct: &str) -> Option<&'static str> {
+    match ct {
+        "image/jpeg" | "image/jpg" => Some("image/jpeg"),
+        "image/png" => Some("image/png"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        _ => None,
+    }
+}
+
+fn ext_from_name(name: &str) -> Option<String> {
+    let ext = name.rsplit_once('.')?.1;
+    if !ext.is_empty() && ext.len() <= 8 && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
+        Some(ext.to_ascii_lowercase())
+    } else {
+        None
+    }
+}
+
+fn ext_from_mime(mime: &str) -> String {
+    match mime {
+        "application/pdf" => "pdf".into(),
+        "application/json" => "json".into(),
+        "application/zip" => "zip".into(),
+        "audio/ogg" => "ogg".into(),
+        "audio/mpeg" => "mp3".into(),
+        "video/mp4" => "mp4".into(),
+        "text/markdown" => "md".into(),
+        "text/csv" => "csv".into(),
+        m if m.starts_with("text/") => "txt".into(),
+        _ => "bin".into(),
+    }
+}
+
+/// Pick the one file worth forwarding. Telegram splits media groups into one
+/// message per file, so a message never carries more than one of these.
+fn pick_media(msg: &TgMessage) -> Option<Media> {
+    if let Some(sizes) = msg.photo.as_ref().filter(|s| !s.is_empty()) {
+        // Biggest resolution that still fits the inline-image cap; if every
+        // size is oversized, take the smallest and let the caller decide.
+        let best = sizes
+            .iter()
+            .filter(|p| p.file_size.is_none_or(|s| s as usize <= MAX_IMAGE_BYTES))
+            .max_by_key(|p| p.file_size.unwrap_or(0))
+            .unwrap_or(&sizes[0]);
+        return Some(Media {
+            file_id: best.file_id.clone(),
+            file_name: "photo.jpg".into(),
+            mime_type: "image/jpeg".into(),
+            file_size: best.file_size,
+        });
+    }
+    let (file, fallback_name) = [
+        (msg.document.as_ref(), "document"),
+        (msg.voice.as_ref(), "voice.ogg"),
+        (msg.video.as_ref(), "video.mp4"),
+        (msg.audio.as_ref(), "audio"),
+    ]
+    .into_iter()
+    .find_map(|(f, name)| f.map(|f| (f, name)))?;
+    Some(Media {
+        file_id: file.file_id.clone(),
+        file_name: file
+            .file_name
+            .clone()
+            .unwrap_or_else(|| fallback_name.to_string()),
+        mime_type: file.mime_type.clone().unwrap_or_default(),
+        file_size: file.file_size,
+    })
+}
+
+/// Resolve a `file_id` through `getFile` and download the bytes. Returns the
+/// bytes plus Telegram's own storage path (useful for an extension hint when
+/// the message carried no filename).
+async fn download_media(
+    client: &reqwest::Client,
+    token: &str,
+    media: &Media,
+) -> Result<(Vec<u8>, String), String> {
+    if let Some(size) = media.file_size {
+        if size as usize > MAX_ATTACHMENT_BYTES {
+            return Err(format!(
+                "{} is {size} bytes (> {MAX_ATTACHMENT_BYTES} cap)",
+                media.file_name
+            ));
+        }
+    }
+    let url = format!(
+        "https://api.telegram.org/bot{token}/getFile?file_id={}",
+        media.file_id
+    );
+    let body: Value = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("getFile failed: {}", e.without_url()))?
+        .json()
+        .await
+        .map_err(|e| format!("getFile parse failed: {}", e.without_url()))?;
+    let file_path = body
+        .pointer("/result/file_path")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| format!("getFile unexpected response: {body}"))?;
+    let resp = client
+        .get(format!(
+            "https://api.telegram.org/file/bot{token}/{file_path}"
+        ))
+        .send()
+        .await
+        .map_err(|e| format!("download failed: {}", e.without_url()))?;
+    if !resp.status().is_success() {
+        return Err(format!("download status {}", resp.status()));
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read bytes: {}", e.without_url()))?;
+    if bytes.len() > MAX_ATTACHMENT_BYTES {
+        return Err(format!(
+            "{} is {} bytes (> {MAX_ATTACHMENT_BYTES} cap after fetch)",
+            media.file_name,
+            bytes.len()
+        ));
+    }
+    Ok((bytes.to_vec(), file_path.to_string()))
+}
+
+/// Download `media` and turn it into either an inline image block or a file on
+/// disk. Failures are logged and swallowed — a broken attachment should never
+/// cost the user their whole turn.
+async fn resolve_media(
+    client: &reqwest::Client,
+    token: &str,
+    media: &Media,
+) -> (Vec<InlineImage>, Option<String>) {
+    let (bytes, tg_path) = match download_media(client, token, media).await {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("telegram: media skipped: {e}");
+            return (Vec::new(), None);
+        }
+    };
+
+    // Oversized images fall through to the file path rather than being
+    // dropped — mimi can still Read them off disk.
+    if let Some(mime) =
+        claude_supported_image_mime(&media.mime_type).filter(|_| bytes.len() <= MAX_IMAGE_BYTES)
+    {
+        eprintln!(
+            "telegram: inlining image {} ({} bytes, {mime})",
+            media.file_name,
+            bytes.len()
+        );
+        return (
+            vec![InlineImage {
+                media_type: mime.to_string(),
+                data_b64: BASE64_STANDARD.encode(&bytes),
+            }],
+            None,
+        );
+    }
+
+    let ext = ext_from_name(&media.file_name)
+        .or_else(|| ext_from_name(&tg_path))
+        .unwrap_or_else(|| ext_from_mime(&media.mime_type));
+    let path = format!("/tmp/mimi-attach-{}.{ext}", uuid::Uuid::new_v4());
+    match tokio::fs::write(&path, &bytes).await {
+        Ok(()) => {
+            eprintln!(
+                "telegram: saved attachment {} ({} bytes) -> {path}",
+                media.file_name,
+                bytes.len()
+            );
+            (Vec::new(), Some(path))
+        }
+        Err(e) => {
+            eprintln!("telegram: failed writing attachment to {path}: {e}");
+            (Vec::new(), None)
+        }
+    }
 }
 
 async fn clear_webhook_for_polling(client: &reqwest::Client, token: &str) -> Result<(), String> {
@@ -476,7 +733,19 @@ async fn telegram_reader(
             };
             *offset.lock().await = upd.update_id + 1;
             let Some(msg) = upd.message else { continue };
-            let Some(text) = msg.text else { continue };
+            // Photos and files carry their text in `caption`, and a bare photo
+            // has neither field set. Keying only off `text` meant every media
+            // message was dropped on the floor — from the user's side mimi
+            // simply never answered.
+            let text = msg
+                .text
+                .clone()
+                .or_else(|| msg.caption.clone())
+                .unwrap_or_default();
+            let media = pick_media(&msg);
+            if text.is_empty() && media.is_none() {
+                continue;
+            }
             let from_id = msg.from.as_ref().map(|u| u.id).unwrap_or(0);
             if let Some(allow) = &allowlist
                 && !allow.contains(&from_id)
@@ -491,11 +760,30 @@ async fn telegram_reader(
                 .unwrap_or_default();
             let chat_type = msg.chat.chat_type.as_deref().unwrap_or("private");
             let chat_id_str = msg.chat.id.to_string();
+            // Downloaded after the allowlist check so blocked users can't make
+            // us pull files.
+            let (images, attachment_file_path) = match &media {
+                Some(m) => resolve_media(&client, &token, m).await,
+                None => (Vec::new(), None),
+            };
+            let image_marker = if images.is_empty() {
+                String::new()
+            } else {
+                "\n[image attachment included below]".to_string()
+            };
+            let attachment_marker = match attachment_file_path.as_deref() {
+                Some(p) => format!("\n[attachment available at {p} — Read it for content]"),
+                None => String::new(),
+            };
+            let attachment_attr = attachment_file_path
+                .as_deref()
+                .map(|p| format!(" attachment_file_path=\"{p}\""))
+                .unwrap_or_default();
             let preamble =
                 crate::context_buffer::preamble_for("telegram", &chat_id_str).unwrap_or_default();
             let time_ctx = crate::channels::time_context_preamble();
             let wrapped = format!(
-                "{}{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\">\n{}\n</channel>",
+                "{}{}{}<channel source=\"telegram\" chat_id=\"{}\" chat_type=\"{}\" user_id=\"{}\" user_name=\"{}\" message_id=\"{}\"{}>\n{}{}{}\n</channel>",
                 time_ctx,
                 OUTBOUND_PROTOCOL,
                 preamble,
@@ -504,14 +792,17 @@ async fn telegram_reader(
                 from_id,
                 user_name,
                 msg.message_id,
-                text
+                attachment_attr,
+                text,
+                image_marker,
+                attachment_marker
             );
             let tg_msg_id_str = msg.message_id.to_string();
             crate::context_buffer::append_user(
                 "telegram",
                 &chat_id_str,
                 &user_name,
-                &text,
+                &format!("{text}{image_marker}{attachment_marker}"),
                 Some(&tg_msg_id_str),
             );
             eprintln!(
@@ -520,11 +811,70 @@ async fn telegram_reader(
             );
             let turn = UserTurn {
                 text: wrapped,
+                images,
                 chat_id: msg.chat.id,
             };
             if tx.send(turn).await.is_err() {
                 return Err("claude pipe closed".into());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(json: &str) -> TgMessage {
+        serde_json::from_str(json).expect("message should deserialize")
+    }
+
+    #[test]
+    fn photo_message_picks_largest_size_under_cap() {
+        let m = msg(
+            r#"{"message_id":7,"chat":{"id":42,"type":"private"},
+                "caption":"look at this",
+                "photo":[{"file_id":"small","file_size":1024},
+                         {"file_id":"large","file_size":8192}]}"#,
+        );
+        assert_eq!(m.caption.as_deref(), Some("look at this"));
+        let media = pick_media(&m).expect("photo should yield media");
+        assert_eq!(media.file_id, "large");
+        assert_eq!(media.mime_type, "image/jpeg");
+        assert!(claude_supported_image_mime(&media.mime_type).is_some());
+    }
+
+    #[test]
+    fn document_message_yields_attachment_with_extension() {
+        let m = msg(
+            r#"{"message_id":8,"chat":{"id":42},
+                "document":{"file_id":"doc1","file_name":"notes.PDF",
+                            "mime_type":"application/pdf","file_size":2048}}"#,
+        );
+        let media = pick_media(&m).expect("document should yield media");
+        assert_eq!(media.file_id, "doc1");
+        assert!(claude_supported_image_mime(&media.mime_type).is_none());
+        assert_eq!(ext_from_name(&media.file_name).as_deref(), Some("pdf"));
+    }
+
+    #[test]
+    fn voice_note_falls_back_to_mime_extension() {
+        let m = msg(
+            r#"{"message_id":9,"chat":{"id":42},
+                "voice":{"file_id":"v1","mime_type":"audio/ogg","file_size":512}}"#,
+        );
+        let media = pick_media(&m).expect("voice should yield media");
+        assert_eq!(
+            ext_from_name(&media.file_name)
+                .unwrap_or_else(|| ext_from_mime(&media.mime_type)),
+            "ogg"
+        );
+    }
+
+    #[test]
+    fn plain_text_message_has_no_media() {
+        let m = msg(r#"{"message_id":10,"chat":{"id":42},"text":"hi"}"#);
+        assert!(pick_media(&m).is_none());
+        assert_eq!(m.text.as_deref(), Some("hi"));
     }
 }
