@@ -114,7 +114,27 @@ pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Result<Vec<E
         .collect())
 }
 
-pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, String> {
+/// Split an arbitrary user string into FTS5-safe quoted terms.
+///
+/// FTS5's MATCH argument is a query language, not a plain string: punctuation
+/// is syntax and bare `AND`/`OR`/`NOT` are operators. So the things mimi
+/// actually searches for — `alice@corp.com`, `O'Brien`, `who is alice?`,
+/// `mimi-brain-interface` — all failed with an fts5 syntax error instead of
+/// returning results. Tokenizing on non-alphanumerics and wrapping each token
+/// in double quotes makes every term a literal, which is always valid syntax.
+///
+/// Returns an empty vec when there is nothing searchable (e.g. `"???"`).
+fn fts_terms(query: &str) -> Vec<String> {
+    // Splitting on non-alphanumerics means a token can never contain a double
+    // quote, so wrapping is enough — no escaping needed.
+    query
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .map(|t| format!("\"{t}\""))
+        .collect()
+}
+
+fn run_fts(db: &Connection, match_expr: &str) -> Result<Vec<Entity>, String> {
     let mut stmt = db
         .prepare(
             "SELECT e.id, e.type, e.name, e.properties, e.created_at, e.updated_at \
@@ -123,10 +143,28 @@ pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, Stri
         )
         .map_err(|e| format!("failed to prepare search query: {e}"))?;
     Ok(stmt
-        .query_map(params![query], row_to_entity)
+        .query_map(params![match_expr], row_to_entity)
         .map_err(|e| format!("search query failed: {e}"))?
         .filter_map(|r| r.ok())
         .collect())
+}
+
+pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, String> {
+    let terms = fts_terms(query);
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Require every term first — that's the precise answer when the caller
+    // knows what they're looking for. If nothing matches, fall back to any
+    // term so a conversational query ("who is alice?", where "who" and "is"
+    // appear nowhere in the graph) still finds Alice. `ORDER BY rank` puts the
+    // entities matching the most terms on top either way.
+    let hits = run_fts(db, &terms.join(" "))?;
+    if !hits.is_empty() || terms.len() < 2 {
+        return Ok(hits);
+    }
+    run_fts(db, &terms.join(" OR "))
 }
 
 pub fn get_stats(db: &Connection) -> Result<Stats, String> {
@@ -273,4 +311,82 @@ fn row_to_entity(row: &rusqlite::Row) -> rusqlite::Result<Entity> {
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn db_with(rows: &[(&str, &str)]) -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        for (name, properties) in rows {
+            db.execute(
+                "INSERT INTO entities (type, name, properties) VALUES ('person', ?1, ?2)",
+                params![name, properties],
+            )
+            .unwrap();
+        }
+        db
+    }
+
+    fn names(entities: &[Entity]) -> Vec<&str> {
+        entities.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn terms_are_quoted() {
+        assert_eq!(fts_terms("alice smith"), ["\"alice\"", "\"smith\""]);
+    }
+
+    #[test]
+    fn punctuation_is_a_term_boundary() {
+        assert_eq!(fts_terms("alice@corp.com"), ["\"alice\"", "\"corp\"", "\"com\""]);
+        assert_eq!(fts_terms("O'Brien"), ["\"O\"", "\"Brien\""]);
+        assert_eq!(fts_terms("mimi-brain"), ["\"mimi\"", "\"brain\""]);
+    }
+
+    #[test]
+    fn fts_operators_are_neutralized() {
+        // Bare AND/OR/NOT are FTS5 operators; quoting makes them literals.
+        assert_eq!(fts_terms("cats AND"), ["\"cats\"", "\"AND\""]);
+    }
+
+    #[test]
+    fn tokenless_query_has_no_terms() {
+        assert!(fts_terms("???").is_empty());
+        assert!(fts_terms("   ").is_empty());
+    }
+
+    #[test]
+    fn punctuated_queries_return_results_instead_of_erroring() {
+        let db = db_with(&[("Alice Smith", r#"{"email": "alice@corp.com"}"#)]);
+
+        // Each of these was an `fts5: syntax error` before.
+        for q in ["alice@corp.com", "O'Brien or alice", "alice-smith", "alice?"] {
+            let hits = search_entities(&db, q).unwrap_or_else(|e| panic!("{q}: {e}"));
+            assert_eq!(names(&hits), ["Alice Smith"], "query: {q}");
+        }
+    }
+
+    #[test]
+    fn conversational_query_falls_back_to_any_term() {
+        let db = db_with(&[("Alice Smith", "{}")]);
+        // "who"/"is" appear nowhere, so requiring every term finds nothing.
+        assert_eq!(names(&search_entities(&db, "who is alice?").unwrap()), ["Alice Smith"]);
+    }
+
+    #[test]
+    fn all_terms_wins_over_any_term_when_both_could_match() {
+        let db = db_with(&[("Alice Smith", "{}"), ("Bob Smith", "{}")]);
+        // Bob also matches "smith", but the all-terms pass succeeds so the
+        // fallback never runs.
+        assert_eq!(names(&search_entities(&db, "alice smith").unwrap()), ["Alice Smith"]);
+    }
+
+    #[test]
+    fn tokenless_search_is_empty_not_an_error() {
+        let db = db_with(&[("Alice Smith", "{}")]);
+        assert!(search_entities(&db, "???").unwrap().is_empty());
+    }
 }
