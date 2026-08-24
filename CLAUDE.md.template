@@ -48,6 +48,20 @@ claude plugin list
 A web dashboard runs at the configured port (default 3131) for remote management.
 The dashboard is managed by the `mimi` CLI — you don't need to touch it directly.
 
+### Schedules (recurring prompts)
+You can give yourself recurring work. Schedules live in `~/.mimi/crons.json` and are
+fired by the scheduler running inside the dashboard process — each one runs its prompt
+as a fresh `claude --print` session in `~/.mimi`.
+
+```bash
+mimi cron list            # schedules, with last and next run
+mimi cron run <id|name>   # fire one now, without waiting for its schedule
+```
+
+Add and remove them from the dashboard's "schedules" view. Expressions are standard
+5-field cron (`minute hour day-of-month month day-of-week`) evaluated in local time.
+Run output is appended to `/tmp/mimi-cron.log`.
+
 ## Your Brain
 
 You have two memory systems:

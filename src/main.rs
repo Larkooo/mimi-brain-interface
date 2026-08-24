@@ -3,6 +3,7 @@ mod channels;
 mod claude;
 mod commands;
 mod context_buffer;
+mod cron;
 mod dashboard;
 mod paths;
 mod subagents;
@@ -52,6 +53,11 @@ enum Commands {
     },
     /// Edit Mimi's config
     Config,
+    /// Manage recurring prompt schedules (~/.mimi/crons.json)
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
     /// Backup ~/.mimi/ data
     Backup,
     /// Run a self-reflection cycle (prefrontal cortex)
@@ -145,6 +151,20 @@ enum SubagentCommands {
         /// Subagent id
         id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// List schedules with their last and next run
+    List,
+    /// Run a schedule now, by id or name
+    Run {
+        /// Schedule id or name
+        id: String,
+    },
+    /// Run the scheduler in the foreground. Only needed when the dashboard
+    /// isn't running — `mimi dashboard` already hosts the scheduler.
+    Start,
 }
 
 #[derive(Subcommand)]
@@ -430,6 +450,11 @@ async fn main() {
             claude::plugin(&refs);
         }
         Some(Commands::Config) => commands::config::run(),
+        Some(Commands::Cron { command }) => match command {
+            CronCommands::List => cron::cli_list(),
+            CronCommands::Run { id } => cron::cli_run(&id),
+            CronCommands::Start => cron::cli_start().await,
+        },
         Some(Commands::Backup) => commands::backup::run(),
         Some(Commands::Reflect) => commands::reflect::run(),
         Some(Commands::Audit) => commands::audit::run(),
