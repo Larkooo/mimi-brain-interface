@@ -330,6 +330,42 @@ pub async fn api_delete(Path(id): Path<String>) -> Result<Json<Value>, (StatusCo
 
 // ---------- SSE: live stream.jsonl tail ----------
 
+/// How many backlog lines to replay when a client attaches.
+const BACKLOG_LINES: usize = 50;
+
+/// Upper bound on the trailing partial line we're willing to hold between
+/// polls. The supervisor tees claude's stdout in raw 8 KiB chunks, so a big
+/// event legitimately straddles several reads — but anything past this is
+/// not a plausible JSONL line, so drop it instead of growing without bound.
+const MAX_PARTIAL_LINE: usize = 4 * 1024 * 1024;
+
+/// Drain every newline-terminated line out of `buf`, leaving any trailing
+/// partial line behind so the next read can complete it.
+///
+/// stream.jsonl is written by the supervisor as raw byte chunks, not whole
+/// lines, so a poll can land mid-event. Splitting the chunk on its own would
+/// hand `serde_json` two unparseable halves and silently drop the event —
+/// which is exactly what happens to the long ones (tool results, multi-block
+/// assistant turns) that matter most.
+fn take_complete_lines(buf: &mut Vec<u8>) -> Vec<String> {
+    let Some(last_nl) = buf.iter().rposition(|&b| b == b'\n') else {
+        if buf.len() > MAX_PARTIAL_LINE {
+            eprintln!(
+                "subagents: dropping {} byte fragment with no line terminator",
+                buf.len()
+            );
+            buf.clear();
+        }
+        return Vec::new();
+    };
+    let complete: Vec<u8> = buf.drain(..=last_nl).collect();
+    String::from_utf8_lossy(&complete)
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// Tail stream.jsonl, emit each new line as an SSE event with the parsed
 /// (and redacted) JSON. Closes when the client disconnects.
 pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
@@ -337,20 +373,22 @@ pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result
     let stream_path = dir.join("stream.jsonl");
 
     let stream = async_stream::stream! {
-        // Send the recent backlog first so the UI has immediate context.
-        if let Ok(mut events) = subagents::tail_events(&id, 50) {
-            for e in events.iter_mut() {
-                redact_value(e);
-                if let Ok(s) = serde_json::to_string(e) {
+        // Prime the backlog and the tail cursor from a SINGLE snapshot of the
+        // file. Reading the backlog and then separately stat-ing for the
+        // cursor would skip anything written in between, and would leave the
+        // cursor mid-line whenever the file ends on a partial write.
+        let mut carry: Vec<u8> = std::fs::read(&stream_path).unwrap_or_default();
+        let mut pos = carry.len() as u64;
+        let backlog = take_complete_lines(&mut carry);
+        for line in backlog.iter().skip(backlog.len().saturating_sub(BACKLOG_LINES)) {
+            if let Ok(mut v) = serde_json::from_str::<Value>(line) {
+                redact_value(&mut v);
+                if let Ok(s) = serde_json::to_string(&v) {
                     yield Ok::<_, Infallible>(Event::default().event("event").data(s));
                 }
             }
         }
 
-        let mut pos: u64 = match std::fs::metadata(&stream_path) {
-            Ok(m) => m.len(),
-            Err(_) => 0,
-        };
         let mut interval = tokio::time::interval(Duration::from_millis(500));
         loop {
             interval.tick().await;
@@ -361,6 +399,7 @@ pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result
             if len < pos {
                 // file truncated/rotated — restart from 0.
                 pos = 0;
+                carry.clear();
             }
             if len == pos { continue; }
             // Read [pos..len] and emit lines.
@@ -373,10 +412,9 @@ pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result
             let mut buf = vec![0u8; (len - pos) as usize];
             if f.read_exact(&mut buf).is_err() { continue; }
             pos = len;
-            let text = String::from_utf8_lossy(&buf).to_string();
-            for line in text.lines() {
-                if line.trim().is_empty() { continue; }
-                if let Ok(mut v) = serde_json::from_str::<Value>(line) {
+            carry.extend_from_slice(&buf);
+            for line in take_complete_lines(&mut carry) {
+                if let Ok(mut v) = serde_json::from_str::<Value>(&line) {
                     redact_value(&mut v);
                     if let Ok(s) = serde_json::to_string(&v) {
                         yield Ok(Event::default().event("event").data(s));
@@ -397,4 +435,60 @@ pub async fn api_events(Path(id): Path<String>) -> Sse<impl Stream<Item = Result
     };
 
     Sse::new(stream.map(|r| r)).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::take_complete_lines;
+
+    /// A single event split across two reads must survive intact — this is
+    /// the case the old chunk-splitting tail dropped on the floor.
+    #[test]
+    fn partial_line_carries_over_to_next_read() {
+        let mut carry: Vec<u8> = Vec::new();
+
+        carry.extend_from_slice(br#"{"type":"assistant","#);
+        assert!(take_complete_lines(&mut carry).is_empty());
+
+        carry.extend_from_slice(b"\"text\":\"hi\"}\n");
+        assert_eq!(
+            take_complete_lines(&mut carry),
+            vec![r#"{"type":"assistant","text":"hi"}"#.to_string()]
+        );
+        assert!(carry.is_empty());
+    }
+
+    #[test]
+    fn complete_lines_emit_and_trailing_fragment_is_kept() {
+        let mut carry: Vec<u8> = Vec::new();
+        carry.extend_from_slice(b"{\"a\":1}\n{\"b\":2}\n{\"c\":");
+        assert_eq!(
+            take_complete_lines(&mut carry),
+            vec!["{\"a\":1}".to_string(), "{\"b\":2}".to_string()]
+        );
+        assert_eq!(carry, b"{\"c\":");
+    }
+
+    #[test]
+    fn blank_lines_are_skipped() {
+        let mut carry: Vec<u8> = b"\n  \n{\"a\":1}\n".to_vec();
+        assert_eq!(take_complete_lines(&mut carry), vec!["{\"a\":1}".to_string()]);
+    }
+
+    /// Multi-byte characters split across a read boundary must not be
+    /// lossy-decoded into replacement chars before the line is complete.
+    #[test]
+    fn utf8_split_across_reads_is_not_corrupted() {
+        let mut carry: Vec<u8> = Vec::new();
+        let text = "{\"text\":\"🌀\"}\n";
+        let bytes = text.as_bytes();
+        // Cut in the middle of the 4-byte emoji.
+        let cut = text.find('🌀').unwrap() + 2;
+
+        carry.extend_from_slice(&bytes[..cut]);
+        assert!(take_complete_lines(&mut carry).is_empty());
+
+        carry.extend_from_slice(&bytes[cut..]);
+        assert_eq!(take_complete_lines(&mut carry), vec![text.trim_end().to_string()]);
+    }
 }
