@@ -914,6 +914,24 @@ fn truncate(text: &str) -> String {
 
 // --- Gateway loop ---
 
+/// Record one of Mimi's own posted messages in the cross-channel context
+/// buffer. `d` is a `MESSAGE_CREATE` payload whose author is a bot; we only
+/// keep it when that bot is *us*. Storing the native message id means the
+/// preamble renders `msg=<id>` for her own turns too, so `[reply:<id>]`
+/// routing can target them.
+fn record_own_message(d: &Value, author_id: u64) {
+    let bot_id = BOT_USER_ID.load(Ordering::SeqCst);
+    if bot_id == 0 || author_id != bot_id { return; }
+
+    let channel_id = d.get("channel_id").and_then(|x| x.as_str()).unwrap_or("");
+    let content = d.get("content").and_then(|x| x.as_str()).unwrap_or("").trim();
+    // Attachment-only or embed-only posts carry no text worth replaying.
+    if channel_id.is_empty() || content.is_empty() { return; }
+
+    let message_id = d.get("id").and_then(|x| x.as_str());
+    crate::context_buffer::append_assistant("discord", channel_id, content, message_id);
+}
+
 /// Handle a `MESSAGE_REACTION_ADD` gateway event. If the target message was
 /// authored by this bot and the reactor isn't the bot itself, append a
 /// reaction entry to the cross-channel context buffer so the next user turn
@@ -1155,7 +1173,18 @@ async fn run_gateway(
         let author_id: u64 = d.pointer("/author/id").and_then(|x| x.as_str())
             .and_then(|s| s.parse().ok()).unwrap_or(0);
         let is_bot = d.pointer("/author/bot").and_then(|x| x.as_bool()).unwrap_or(false);
-        if is_bot { continue; }
+        if is_bot {
+            // Our own replies come back on the gateway as MESSAGE_CREATE with
+            // author == our bot user. Since all outbound text moved to the
+            // `~/.mimi/bin/discord` wrappers, this echo is the only place the
+            // bridge still sees what Mimi actually said — so record it as an
+            // assistant entry in the rolling context buffer. Without it the
+            // buffer holds a one-sided transcript (user turns + reactions
+            // only) and a restarted bridge replays questions Mimi has already
+            // answered. Other bots stay filtered out.
+            record_own_message(d, author_id);
+            continue;
+        }
         let permission = match ACCESS.get().and_then(|a| a.permission_for(author_id)) {
             Some(p) => p,
             None => {
