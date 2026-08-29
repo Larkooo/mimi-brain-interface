@@ -1364,7 +1364,19 @@ async fn run_gateway(
 
         let guild_attr = guild_id.map(|g| format!(" guild_id=\"{g}\"")).unwrap_or_default();
         let channel_id_str = channel_id.to_string();
-        let preamble = crate::context_buffer::preamble_for("discord", &channel_id_str)
+        // Scope the rolling context buffer by permission tier. The buffer is
+        // shared across every channel mimi speaks on (all guilds, all DMs,
+        // Telegram), so handing the cross-channel view to a guest would leak
+        // the owner's private conversations into a public server — exactly
+        // what the guest reminders below tell mimi not to do. Owner turns
+        // keep the full cross-channel view.
+        let scope = match permission {
+            Permission::Owner => crate::context_buffer::Scope::CrossChannel,
+            Permission::Guest | Permission::StrictGuest => {
+                crate::context_buffer::Scope::ChannelOnly
+            }
+        };
+        let preamble = crate::context_buffer::preamble_scoped("discord", &channel_id_str, scope)
             .unwrap_or_default();
         let (guest_preamble, guest_memory) = match permission {
             Permission::Owner => (String::new(), String::new()),
