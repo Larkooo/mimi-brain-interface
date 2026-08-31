@@ -11,13 +11,40 @@ pub fn run() {
     let repo = find_repo_dir();
     println!("Updating from {}", repo.display());
 
-    let before = git_rev(&repo, "HEAD");
+    // `mimi audit` leaves this checkout parked on the `mimi/audit-*` branch it
+    // just pushed, so `mimi update` rarely runs from master. The `git reset
+    // --hard origin/master` below would silently rewrite that branch ref and
+    // discard any uncommitted work, and — worse — `before` would be the audit
+    // branch tip instead of the deployed master commit, so the rust/dashboard
+    // change detection that decides what to rebuild compares the wrong pair of
+    // revisions. Refuse to touch a dirty tree, and always land on master first.
+    if let Some(dirty) = working_tree_dirty(&repo) {
+        eprintln!(
+            "Error: {} has uncommitted changes — refusing to reset:\n{}",
+            repo.display(),
+            dirty
+        );
+        eprintln!("Commit, stash, or discard them, then re-run `mimi update`.");
+        std::process::exit(1);
+    }
 
     if !git(&repo, &["fetch", "origin", "master"]) {
         eprintln!("Error: git fetch failed");
         std::process::exit(1);
     }
 
+    let branch = current_branch(&repo);
+    if branch != "master" {
+        println!("On branch '{branch}' — switching to master before updating.");
+        if !git(&repo, &["checkout", "master"])
+            && !git(&repo, &["checkout", "-B", "master", "origin/master"])
+        {
+            eprintln!("Error: could not switch {} to master", repo.display());
+            std::process::exit(1);
+        }
+    }
+
+    let before = git_rev(&repo, "HEAD");
     let after = git_rev(&repo, "origin/master");
     if before == after {
         println!("Already up to date ({}).", &after[..7.min(after.len())]);
@@ -134,6 +161,35 @@ fn git_rev(repo: &Path, rev: &str) -> String {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => String::new(),
     }
+}
+
+/// `git rev-parse --abbrev-ref HEAD` — the checked-out branch name, or "HEAD"
+/// when detached. Empty string if git fails.
+fn current_branch(repo: &Path) -> String {
+    let out = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(repo)
+        .output();
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => String::new(),
+    }
+}
+
+/// `Some(porcelain output)` when tracked files have staged or unstaged changes
+/// that `git reset --hard` would throw away; `None` when the tree is clean.
+/// Untracked files are ignored — `reset --hard` leaves those alone.
+fn working_tree_dirty(repo: &Path) -> Option<String> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain", "--untracked-files=no"])
+        .current_dir(repo)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let status = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if status.is_empty() { None } else { Some(status) }
 }
 
 fn git_log(repo: &Path, range: &str) -> String {
