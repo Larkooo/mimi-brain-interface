@@ -1702,13 +1702,14 @@ mod session {
     use tokio::time::timeout;
 
     use super::gateway::{
-        self, Frame, Op, SelectProtocol, SelectProtocolData, SessionDescription, Speaking,
+        self, Frame, Handshake, Op, SelectProtocol, SelectProtocolData, SessionDescription,
+        Speaking,
     };
     use super::{codec, rtp, stt, tts, vad};
     use crate::channels::discord::gateway_hooks::{self, VoiceEvent};
 
     /// Live voice session handle. Drop to leave (drop fires the cancel
-    /// channels which tears down the loops).
+    /// channel, which tears down the loops and hangs up the voice WS).
     pub struct Live {
         pub guild_id: u64,
         pub channel_id: u64,
@@ -1716,6 +1717,14 @@ mod session {
         /// Push text here to enqueue an utterance for TTS → opus → RTP send.
         pub say_tx: mpsc::UnboundedSender<String>,
         cancel: mpsc::Sender<()>,
+        /// Voice-gateway WS handles. The task `gateway::connect` spawned
+        /// breaks out of its select the moment *any* of these three channel
+        /// ends is dropped, so they have to outlive `join()` — they live
+        /// here for the session's lifetime and hang the socket up when
+        /// `Live` drops. `_gw_out_tx` is also the channel post-READY frames
+        /// (SPEAKING toggles, RESUME) go out on.
+        _gw_cancel: mpsc::Sender<()>,
+        _gw_out_tx: mpsc::UnboundedSender<Frame>,
     }
 
     impl Live {
@@ -1728,6 +1737,18 @@ mod session {
         pub async fn leave(self) {
             let _ = gateway_hooks::send_voice_state_update(self.guild_id, None, false, false).await;
             let _ = self.cancel.send(()).await;
+            // Dropping `self` closes the voice-gateway channels, which ends
+            // the WS task and with it the websocket.
+        }
+    }
+
+    impl Drop for Live {
+        fn drop(&mut self) {
+            // Fire the supervisor even when the handle is dropped without an
+            // explicit `leave()`. The audio loops hold their own clones of
+            // `cancel`, so waiting for "all senders dropped" would never
+            // resolve and they'd run forever.
+            let _ = self.cancel.try_send(());
         }
     }
 
@@ -1880,11 +1901,17 @@ mod session {
         });
 
         // 9. Spawn audio loops.
-        let (cancel_tx, cancel_rx) = mpsc::channel::<()>(1);
+        //
+        // `cancel_tx` is the session-wide shutdown signal: `leave()` (or
+        // dropping `Live`) fires it, and either audio loop fires it if it
+        // hits a fatal error. A supervisor task waits on the receiving end
+        // and aborts both loops, so a dead inbound path tears the whole
+        // session down instead of parking on `recv()` forever.
+        let (cancel_tx, mut cancel_rx) = mpsc::channel::<()>(1);
         let (say_tx, say_rx) = mpsc::unbounded_channel::<String>();
         let socket = Arc::new(discovered.socket);
         let secret = Arc::new(secret_key);
-        spawn_outbound_loop(
+        let outbound = spawn_outbound_loop(
             Arc::clone(&socket),
             Arc::clone(&secret),
             handshake.ssrc,
@@ -1892,36 +1919,37 @@ mod session {
             say_rx,
             cancel_tx.clone(),
         );
-        spawn_inbound_loop(
+        let inbound = spawn_inbound_loop(
             Arc::clone(&socket),
             Arc::clone(&secret),
             cipher_mode,
             channel_id,
             cancel_tx.clone(),
         );
+        tokio::spawn(async move {
+            let _ = cancel_rx.recv().await;
+            outbound.abort();
+            inbound.abort();
+        });
+
+        // 10. Hand the voice-gateway channel ends to `Live` so the WS task
+        //     survives this function. Dropping them here would break its
+        //     select immediately — no heartbeat, socket closed, Discord
+        //     drops us out of the channel seconds after joining.
+        let Handshake { ssrc, cancel: gw_cancel, out_tx: gw_out_tx, in_rx: mut gw_in_rx, .. } =
+            handshake;
+        // Nothing consumes gateway dispatches after SESSION_DESCRIPTION yet
+        // (peer SPEAKING, CLIENT_DISCONNECT). Drain them so the queue can't
+        // grow without bound; the task ends when the WS task drops `in_tx`.
+        tokio::spawn(async move { while gw_in_rx.recv().await.is_some() {} });
 
         Ok(Live {
-            guild_id, channel_id, ssrc: handshake.ssrc,
-            say_tx, cancel: cancel_rx_keepalive(cancel_rx),
+            guild_id, channel_id, ssrc,
+            say_tx,
+            cancel: cancel_tx,
+            _gw_cancel: gw_cancel,
+            _gw_out_tx: gw_out_tx,
         })
-    }
-
-    /// Park `cancel_rx` so dropping it fires the loops' shutdown. We
-    /// don't actually need to hold the receiver — we just want the
-    /// `Sender` half to live in `Live` and signal shutdown when `Live`
-    /// drops. Returning a fresh sender that mirrors the original keeps
-    /// the API tidy.
-    fn cancel_rx_keepalive(_rx: mpsc::Receiver<()>) -> mpsc::Sender<()> {
-        // Trivial parking — we keep the receiver alive in a detached
-        // task so the original `cancel_tx` clones (held by the loops)
-        // don't immediately error on send. The receiver here doesn't
-        // *do* anything; the loops have their own cancel_rx clones via
-        // the cancel_tx they were spawned with.
-        let (tx, mut rx) = mpsc::channel::<()>(1);
-        tokio::spawn(async move {
-            let _ = rx.recv().await;
-        });
-        tx
     }
 
     /// Outbound: drain `say_rx`, run TTS, frame into 20ms chunks, opus
@@ -1933,7 +1961,7 @@ mod session {
         cipher_mode: rtp::CipherMode,
         mut say_rx: mpsc::UnboundedReceiver<String>,
         cancel_signal: mpsc::Sender<()>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut encoder = match codec::Encoder::new() {
                 Ok(e) => e,
@@ -1987,7 +2015,7 @@ mod session {
                     send_ticker.tick().await;
                 }
             }
-        });
+        })
     }
 
     async fn send_one_frame(
@@ -2019,7 +2047,7 @@ mod session {
         cipher_mode: rtp::CipherMode,
         channel_id: u64,
         cancel_signal: mpsc::Sender<()>,
-    ) {
+    ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let decoder_box = Arc::new(Mutex::new(match codec::Decoder::new() {
                 Ok(d) => d,
@@ -2081,7 +2109,7 @@ mod session {
                     tokio::spawn(handle_utterance(channel_id, utt));
                 }
             }
-        });
+        })
     }
 
     /// STT the utterance, hand to claude, push the reply into the
