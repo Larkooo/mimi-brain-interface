@@ -16,6 +16,8 @@ use tokio::sync::{Mutex, mpsc};
 use crate::paths;
 
 const POLL_TIMEOUT_SECS: u64 = 30;
+/// Ceiling for the exponential retry backoff on failed `getUpdates` polls.
+const MAX_BACKOFF_SECS: u64 = 30;
 
 // Appended to every Telegram turn. Tells Mimi her stdout is not the wire
 // anymore — outbound must go through `telegram` Bash-wrapper tool calls.
@@ -413,6 +415,23 @@ async fn clear_webhook_for_polling(client: &reqwest::Client, token: &str) -> Res
     }
 }
 
+/// Sleep between failed `getUpdates` attempts, doubling from 2s up to
+/// `MAX_BACKOFF_SECS`. `failures` is bumped in place and must be reset by the
+/// caller on a good poll.
+///
+/// Every failure path has to go through here. Without it a Telegram-side
+/// outage that returns a non-JSON body turns the poll loop into an
+/// unthrottled retry storm against the API — which is exactly what gets a bot
+/// token rate-limited, so the bridge stays down long after Telegram recovers.
+async fn backoff(failures: &mut u32) {
+    *failures = failures.saturating_add(1);
+    let secs = 2u64
+        .saturating_pow((*failures).min(5))
+        .min(MAX_BACKOFF_SECS);
+    eprintln!("telegram: retrying getUpdates in {secs}s (failure #{failures})");
+    tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+}
+
 async fn telegram_reader(
     client: reqwest::Client,
     token: String,
@@ -421,6 +440,7 @@ async fn telegram_reader(
 ) -> Result<(), String> {
     let offset = Arc::new(Mutex::new(0i64));
     let mut consecutive_conflicts = 0u32;
+    let mut consecutive_failures = 0u32;
     loop {
         let off = *offset.lock().await;
         let url = format!(
@@ -431,25 +451,31 @@ async fn telegram_reader(
             Ok(r) => r,
             Err(e) => {
                 eprintln!("telegram: getUpdates request failed: {}", e.without_url());
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                backoff(&mut consecutive_failures).await;
                 continue;
             }
         };
+        // Keep the status around: when the body isn't JSON (Telegram/CDN 5xx
+        // pages are HTML) the serde error alone says nothing about why.
+        let status = resp.status();
         let body: Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
-                eprintln!("telegram: parse error: {e}");
+                eprintln!("telegram: getUpdates parse error (http {status}): {e}");
+                backoff(&mut consecutive_failures).await;
                 continue;
             }
         };
         let results = match body.get("result").and_then(|x| x.as_array()) {
             Some(r) => {
                 consecutive_conflicts = 0;
+                consecutive_failures = 0;
                 r
             }
             None => {
-                let wait = if body.get("error_code").and_then(|x| x.as_i64()) == Some(409) {
+                if body.get("error_code").and_then(|x| x.as_i64()) == Some(409) {
                     consecutive_conflicts = consecutive_conflicts.saturating_add(1);
+                    consecutive_failures = 0;
                     eprintln!(
                         "telegram: getUpdates conflict ({consecutive_conflicts}/3): another poller owns this bot token"
                     );
@@ -459,13 +485,12 @@ async fn telegram_reader(
                                 .into(),
                         );
                     }
-                    35
+                    tokio::time::sleep(tokio::time::Duration::from_secs(35)).await;
                 } else {
                     consecutive_conflicts = 0;
-                    eprintln!("telegram: unexpected response: {body}");
-                    2
-                };
-                tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                    eprintln!("telegram: unexpected response (http {status}): {body}");
+                    backoff(&mut consecutive_failures).await;
+                }
                 continue;
             }
         };
