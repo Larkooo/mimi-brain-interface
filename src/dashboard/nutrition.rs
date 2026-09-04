@@ -156,7 +156,21 @@ fn query_day(user: &str, date: &str) -> Result<DaySummary, String> {
     })
 }
 
+/// Aggregate the trailing `days` calendar days (today inclusive) into a
+/// per-day series plus the daily average over that window.
+///
+/// The window is bounded at both ends. Without an upper bound a row whose
+/// `meal_date` lands in the future — `api_log` takes the date from the
+/// caller, so a typo or a client on another timezone is enough — sits in
+/// every trend from then on and quietly inflates it.
+///
+/// Averages divide by the length of the window, not by the number of days
+/// that happen to have entries. Dividing by the latter answers "what did I
+/// eat on the days I logged", which is not what a panel labelled `last 7
+/// days / avg N cal` claims: log two 2400-cal days out of seven and it
+/// reports 2400/day next to a chart showing five empty bars.
 fn query_trend(user: &str, days: i64) -> Result<Trend, String> {
+    let days = days.max(1);
     let db = brain::open();
     let mut stmt = db
         .prepare(
@@ -167,7 +181,9 @@ fn query_trend(user: &str, days: i64) -> Result<Trend, String> {
                     ROUND(SUM(fat_g),1) AS fat,
                     COUNT(*) AS meals
              FROM nutrition_log
-             WHERE user=?1 AND meal_date >= date('now','localtime', ?2)
+             WHERE user=?1
+               AND meal_date >= date('now','localtime', ?2)
+               AND meal_date <= date('now','localtime')
              GROUP BY meal_date
              ORDER BY meal_date",
         )
@@ -188,12 +204,13 @@ fn query_trend(user: &str, days: i64) -> Result<Trend, String> {
         .filter_map(|r| r.ok())
         .collect();
 
-    let n = day_rows.len().max(1) as f64;
+    let window = days as f64;
     let avg = Totals {
-        calories: (day_rows.iter().map(|d| d.cal).sum::<f64>() / n).round(),
-        protein_g: (day_rows.iter().map(|d| d.prot).sum::<f64>() / n).round(),
-        carbs_g: (day_rows.iter().map(|d| d.carbs).sum::<f64>() / n).round(),
-        fat_g: (day_rows.iter().map(|d| d.fat).sum::<f64>() / n).round(),
+        calories: (day_rows.iter().map(|d| d.cal).sum::<f64>() / window).round(),
+        protein_g: (day_rows.iter().map(|d| d.prot).sum::<f64>() / window).round(),
+        carbs_g: (day_rows.iter().map(|d| d.carbs).sum::<f64>() / window).round(),
+        fat_g: (day_rows.iter().map(|d| d.fat).sum::<f64>() / window).round(),
+        // Not an average — the total number of meals logged in the window.
         meals_count: day_rows.iter().map(|d| d.meals).sum(),
     };
 
