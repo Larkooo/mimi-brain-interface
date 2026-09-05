@@ -6,12 +6,14 @@
 //! recent same-channel turns) so the assistant has a coherent view of what the
 //! user just said elsewhere.
 //!
-//! The file is capped by line count; on write we truncate from the head if the
-//! cap is exceeded. Access is serialized via a blocking mutex — throughput
-//! here is tiny (a handful of lines per minute) so lock contention is a
-//! non-issue.
+//! The file is capped per-channel rather than globally: a burst on one busy
+//! channel must not evict another channel's history, because the entries a
+//! turn actually needs are the ones from the *other* channels. A global
+//! ceiling still bounds the file overall. Access is serialized via a blocking
+//! mutex — throughput here is tiny (a handful of lines per minute) so lock
+//! contention is a non-issue.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::sync::{Mutex, OnceLock};
@@ -21,7 +23,14 @@ use serde::{Deserialize, Serialize};
 
 use crate::paths;
 
-const MAX_LINES: usize = 300;
+/// Hard ceiling on the whole file, so a large number of distinct channels
+/// can't grow it without bound. Only reached once several channels are
+/// simultaneously at their per-channel cap.
+const MAX_LINES: usize = 600;
+/// Retention per `(source, chat_id)`. Comfortably above `FIRST_TURN_LOOKBACK`
+/// so every channel keeps enough history to recover its conversation after a
+/// bridge restart, no matter how loud its neighbours have been.
+const MAX_LINES_PER_CHANNEL: usize = 150;
 const CONTEXT_LOOKBACK: usize = 20;
 const SAME_CHANNEL_WINDOW_SECS: i64 = 60;
 const FIRST_TURN_LOOKBACK: usize = 40;
@@ -134,20 +143,49 @@ fn append(entry: Entry) {
         }
     };
 
-    // Read current lines to enforce cap; drop oldest if over.
+    // Read current lines to enforce the caps; drop oldest if over.
     let existing = fs::read_to_string(&path).unwrap_or_default();
     let mut lines: Vec<&str> = existing.lines().collect();
     lines.push(&line);
-    if lines.len() > MAX_LINES {
-        let drop = lines.len() - MAX_LINES;
-        lines.drain(..drop);
-    }
-    let mut out = lines.join("\n");
+    let mut out = trim(&lines).join("\n");
     out.push('\n');
 
     if let Err(e) = fs::write(&path, out) {
         eprintln!("context_buffer: write failed: {e}");
     }
+}
+
+/// Enforce the retention caps over `lines` (oldest first), returning the
+/// lines to keep in the same order.
+///
+/// Walks newest → oldest and keeps at most `MAX_LINES_PER_CHANNEL` entries per
+/// `(source, chat_id)`, stopping at `MAX_LINES` overall. A per-channel budget
+/// is what makes the buffer useful: with one global FIFO, an hour of chatter in
+/// a busy Discord guild evicts every Telegram entry, so the next Telegram turn
+/// gets a `<recent_context>` with no cross-channel history in it at all — the
+/// exact thing the block exists to carry.
+///
+/// Lines that don't parse as an `Entry` are dropped; `recent()` skips them
+/// anyway, so keeping them would only spend budget.
+fn trim<'a>(lines: &[&'a str]) -> Vec<&'a str> {
+    let mut per_channel: HashMap<(String, String), usize> = HashMap::new();
+    let mut kept: Vec<&'a str> = Vec::with_capacity(lines.len().min(MAX_LINES));
+    for line in lines.iter().rev() {
+        let Ok(entry) = serde_json::from_str::<Entry>(line) else {
+            continue;
+        };
+        let count = per_channel.entry((entry.source, entry.chat_id)).or_insert(0);
+        if *count >= MAX_LINES_PER_CHANNEL {
+            continue;
+        }
+        *count += 1;
+        kept.push(line);
+        if kept.len() >= MAX_LINES {
+            break;
+        }
+    }
+    kept.reverse();
+    kept
 }
 
 pub fn recent() -> Vec<Entry> {
@@ -300,4 +338,83 @@ pub fn clear() -> std::io::Result<()> {
         OpenOptions::new().write(true).truncate(true).open(&path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(source: &str, chat_id: &str, text: &str) -> String {
+        serde_json::to_string(&Entry {
+            ts: Utc::now(),
+            source: source.into(),
+            chat_id: chat_id.into(),
+            user_name: "u".into(),
+            kind: Kind::User,
+            text: text.into(),
+            message_id: None,
+        })
+        .unwrap()
+    }
+
+    /// The regression this module was fixed for: a burst on one channel used
+    /// to push every other channel out of the shared FIFO.
+    #[test]
+    fn busy_channel_does_not_evict_quiet_channel() {
+        let mut owned = vec![line("telegram", "42", "hello from telegram")];
+        for i in 0..(MAX_LINES_PER_CHANNEL * 3) {
+            owned.push(line("discord", "9", &format!("chatter {i}")));
+        }
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let kept = trim(&lines);
+        let parsed: Vec<Entry> = kept
+            .iter()
+            .map(|l| serde_json::from_str::<Entry>(l).unwrap())
+            .collect();
+
+        assert_eq!(parsed.iter().filter(|e| e.source == "telegram").count(), 1);
+        assert_eq!(
+            parsed.iter().filter(|e| e.source == "discord").count(),
+            MAX_LINES_PER_CHANNEL
+        );
+    }
+
+    #[test]
+    fn keeps_newest_per_channel_in_order() {
+        let mut owned = Vec::new();
+        for i in 0..(MAX_LINES_PER_CHANNEL + 5) {
+            owned.push(line("discord", "9", &format!("{i}")));
+        }
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+
+        let kept = trim(&lines);
+        assert_eq!(kept.len(), MAX_LINES_PER_CHANNEL);
+        // Oldest 5 dropped, remainder still chronological.
+        let first: Entry = serde_json::from_str(kept[0]).unwrap();
+        let last: Entry = serde_json::from_str(kept[kept.len() - 1]).unwrap();
+        assert_eq!(first.text, "5");
+        assert_eq!(last.text, format!("{}", MAX_LINES_PER_CHANNEL + 4));
+    }
+
+    /// Distinct chats on the same platform get their own budgets, and the
+    /// global ceiling still bounds the file.
+    #[test]
+    fn global_ceiling_still_applies() {
+        let mut owned = Vec::new();
+        for chat in 0..8 {
+            for i in 0..MAX_LINES_PER_CHANNEL {
+                owned.push(line("discord", &chat.to_string(), &format!("{chat}-{i}")));
+            }
+        }
+        let lines: Vec<&str> = owned.iter().map(String::as_str).collect();
+        assert_eq!(trim(&lines).len(), MAX_LINES);
+    }
+
+    #[test]
+    fn drops_unparseable_lines() {
+        let good = line("telegram", "42", "ok");
+        let lines = vec!["not json", good.as_str(), ""];
+        assert_eq!(trim(&lines), vec![good.as_str()]);
+    }
 }
