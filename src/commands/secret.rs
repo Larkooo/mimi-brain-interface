@@ -60,22 +60,36 @@ fn ensure_key() -> std::path::PathBuf {
     key_path
 }
 
-/// Set a secret — delegates to vault user
-pub fn set(name: &str, value: &str) {
+/// Set a secret — delegates to vault user. Returns Err on encrypt/sudo failure
+/// so callers (CLI, dashboard) can distinguish saved-vs-not.
+pub fn set(name: &str, value: &str) -> Result<(), String> {
     if is_vault_user() {
-        set_direct(name, value);
+        set_direct(name, value)
     } else {
         let output = sudo_vault(&["set", name, value]);
+        // Surface child stdout/stderr to the user so the existing CLI output
+        // is preserved, but propagate failure as an Err instead of swallowing it.
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = stderr.trim();
+            if msg.is_empty() {
+                Err(format!("sudo mimi secret set failed (exit {:?})", output.status.code()))
+            } else {
+                Err(msg.to_string())
+            }
+        }
     }
 }
 
 /// Direct set (runs as vault user)
-fn set_direct(name: &str, value: &str) {
+fn set_direct(name: &str, value: &str) -> Result<(), String> {
     let key_path = ensure_key();
     let dir = vault_secrets_dir();
-    fs::create_dir_all(&dir).ok();
+    fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let secret_path = dir.join(name);
 
     let result = Command::new("openssl")
@@ -102,9 +116,14 @@ fn set_direct(name: &str, value: &str) {
                 let _ = fs::set_permissions(&secret_path, fs::Permissions::from_mode(0o600));
             }
             println!("Secret '{}' saved (encrypted)", name);
+            Ok(())
         }
-        Ok(o) => eprintln!("Failed to encrypt: {}", String::from_utf8_lossy(&o.stderr)),
-        Err(e) => eprintln!("Failed to run openssl: {}", e),
+        Ok(o) => {
+            // openssl wrote a (possibly empty/partial) file before failing — clean up.
+            let _ = fs::remove_file(&secret_path);
+            Err(format!("openssl: {}", String::from_utf8_lossy(&o.stderr).trim()))
+        }
+        Err(e) => Err(format!("spawn openssl: {e}")),
     }
 }
 
@@ -190,20 +209,33 @@ pub fn list() {
     }
 }
 
-/// Delete a secret — delegates to vault user
-pub fn delete(name: &str) {
+/// Delete a secret — delegates to vault user. Returns Err if the secret
+/// doesn't exist or the underlying remove/sudo call fails, so the dashboard
+/// can show an accurate failure instead of a fake-success.
+pub fn delete(name: &str) -> Result<(), String> {
     if is_vault_user() {
         let path = vault_secrets_dir().join(name);
-        if path.exists() {
-            fs::remove_file(&path).ok();
-            println!("Secret '{}' deleted.", name);
-        } else {
-            eprintln!("Secret '{}' not found.", name);
+        if !path.exists() {
+            return Err(format!("secret '{}' not found", name));
         }
+        fs::remove_file(&path).map_err(|e| format!("remove {}: {e}", path.display()))?;
+        println!("Secret '{}' deleted.", name);
+        Ok(())
     } else {
         let output = sudo_vault(&["delete", name]);
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = stderr.trim();
+            if msg.is_empty() {
+                Err(format!("sudo mimi secret delete failed (exit {:?})", output.status.code()))
+            } else {
+                Err(msg.to_string())
+            }
+        }
     }
 }
 

@@ -11,6 +11,7 @@ export function SecretsView() {
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
   const [showValue, setShowValue] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try { setSecrets(await getSecrets()) } catch {}
@@ -20,15 +21,25 @@ export function SecretsView() {
 
   const handleCreate = async () => {
     if (!name.trim() || !value.trim()) return
-    await setSecret(name.trim(), value)
-    setName(''); setValue(''); setShowValue(false)
-    setAdding(false)
-    refresh()
+    setError(null)
+    try {
+      await setSecret(name.trim(), value)
+      setName(''); setValue(''); setShowValue(false)
+      setAdding(false)
+      refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to save secret')
+    }
   }
 
   const handleDelete = async (secretName: string) => {
-    await deleteSecret(secretName)
-    refresh()
+    setError(null)
+    try {
+      await deleteSecret(secretName)
+      refresh()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'failed to delete secret')
+    }
   }
 
   return (
@@ -55,6 +66,12 @@ export function SecretsView() {
           Use <span className="font-mono text-foreground/80">mimi secret run</span> to inject them as environment variables.
         </p>
       </div>
+
+      {error && (
+        <div className="surface px-4 py-3 mb-5 border-danger/40 bg-danger/10">
+          <p className="text-[12px] text-danger font-mono break-all">{error}</p>
+        </div>
+      )}
 
       {adding && (
         <div className="surface p-5 mb-5 space-y-4">
