@@ -72,6 +72,13 @@ sqlite3 ~/.mimi/brain.db "INSERT INTO relationships (source_id, target_id, type)
 
 **Search:**
 ```bash
+mimi brain search "alice's email"
+```
+Prefer this over raw `MATCH` — anything with punctuation in it (`a@b.com`, `alice's`,
+`e-mail`) is an FTS5 syntax error, and `sqlite3 ... MATCH` reports that as *no rows*,
+which reads exactly like "I don't know them". `mimi brain search` retries such queries
+as a plain word search.
+```bash
 sqlite3 ~/.mimi/brain.db "SELECT * FROM entities_fts WHERE entities_fts MATCH 'alice'"
 ```
 

@@ -114,7 +114,56 @@ pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Result<Vec<E
         .collect())
 }
 
+/// Full-text search over entities.
+///
+/// `query` is whatever the caller typed. FTS5 has its own query grammar, so
+/// everyday input — `nacer@x.com`, `mimi's laptop`, `who is alice?`, `e-mail`
+/// — is a *syntax error*, not a search for those words. Handing such a query
+/// straight to MATCH therefore finds nothing, which reads as "Mimi doesn't
+/// know this person" rather than "the query was malformed".
+///
+/// So: run the query as written first (deliberate FTS5 syntax like
+/// `alice OR bob`, `name:alice` or `ali*` keeps working), and if FTS5 rejects
+/// it, retry it as a plain bag of words.
 pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, String> {
+    match run_fts(db, query) {
+        Ok(hits) => Ok(hits),
+        Err(raw_err) => match plain_text_query(query) {
+            Some(fallback) => run_fts(db, &fallback).map_err(|_| raw_err),
+            // Nothing searchable in the input (empty or pure punctuation).
+            None => Ok(Vec::new()),
+        },
+    }
+}
+
+/// Rewrite arbitrary text as an FTS5 expression: each run of word characters
+/// becomes a quoted term, all required (FTS5's implicit AND). Effectively
+/// "treat every punctuation mark as a space". `None` when the input holds no
+/// word characters at all.
+///
+/// Single-character terms are dropped when longer ones exist — they're nearly
+/// always tokenizer debris (the `s` left by `nacer's`, the `x` in `a@x.com`)
+/// and, being ANDed, would veto an otherwise good match.
+fn plain_text_query(input: &str) -> Option<String> {
+    let words: Vec<&str> = input
+        .split(|c: char| !c.is_alphanumeric() && c != '_')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let meaningful: Vec<&str> = words.iter().copied().filter(|t| t.chars().count() > 1).collect();
+    let terms = if meaningful.is_empty() { words } else { meaningful };
+    if terms.is_empty() {
+        return None;
+    }
+    Some(
+        terms
+            .iter()
+            .map(|t| format!("\"{t}\""))
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn run_fts(db: &Connection, match_expr: &str) -> Result<Vec<Entity>, String> {
     let mut stmt = db
         .prepare(
             "SELECT e.id, e.type, e.name, e.properties, e.created_at, e.updated_at \
@@ -122,11 +171,18 @@ pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, Stri
              WHERE entities_fts MATCH ?1 ORDER BY rank",
         )
         .map_err(|e| format!("failed to prepare search query: {e}"))?;
-    Ok(stmt
-        .query_map(params![query], row_to_entity)
-        .map_err(|e| format!("search query failed: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect())
+    let rows = stmt
+        .query_map(params![match_expr], row_to_entity)
+        .map_err(|e| format!("search query failed: {e}"))?;
+    // Collected eagerly rather than with `filter_map(Result::ok)`: FTS5 reports
+    // a malformed MATCH expression on the first step, not at prepare time, so
+    // discarding row errors here is what silently turned a broken query into an
+    // empty (but confident) result set.
+    let mut hits = Vec::new();
+    for row in rows {
+        hits.push(row.map_err(|e| format!("search query failed: {e}"))?);
+    }
+    Ok(hits)
 }
 
 pub fn get_stats(db: &Connection) -> Result<Stats, String> {
@@ -273,4 +329,91 @@ fn row_to_entity(row: &rusqlite::Row) -> rusqlite::Result<Entity> {
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A brain with a couple of people in it, on the schema `mimi setup` builds.
+    fn fixture() -> Connection {
+        let db = Connection::open_in_memory().expect("open in-memory db");
+        db.execute_batch(SCHEMA).expect("init schema");
+        add_entity(
+            &db,
+            "person",
+            "Nacer Djaghmoum",
+            r#"{"email": "nacer@example.com", "role": "e-mail admin"}"#,
+        )
+        .expect("insert entity");
+        add_entity(&db, "person", "Alice", r#"{"note": "who is she"}"#).expect("insert entity");
+        db
+    }
+
+    fn names(db: &Connection, query: &str) -> Vec<String> {
+        search_entities(db, query)
+            .unwrap_or_else(|e| panic!("search({query:?}) errored: {e}"))
+            .into_iter()
+            .map(|e| e.name)
+            .collect()
+    }
+
+    #[test]
+    fn plain_words_still_match() {
+        let db = fixture();
+        assert_eq!(names(&db, "nacer"), ["Nacer Djaghmoum"]);
+        assert_eq!(names(&db, "nacer djaghmoum"), ["Nacer Djaghmoum"]);
+    }
+
+    #[test]
+    fn punctuation_no_longer_swallows_the_match() {
+        // Every one of these is an FTS5 syntax error verbatim, so before the
+        // fallback they came back as a confident empty result set.
+        let db = fixture();
+        for query in [
+            "nacer@example.com",
+            "nacer's email",
+            "e-mail admin",
+            "\"nacer",
+            "djaghmoum, nacer",
+        ] {
+            assert!(run_fts(&db, query).is_err(), "{query:?} should be invalid FTS5");
+            assert_eq!(names(&db, query), ["Nacer Djaghmoum"], "query: {query:?}");
+        }
+    }
+
+    #[test]
+    fn punctuated_query_that_matches_nothing_stays_empty() {
+        // Terms are ANDed, so a stranger's address at a known domain is a miss,
+        // not a loose hit on "example"/"com".
+        let db = fixture();
+        assert!(names(&db, "tobias@example.com").is_empty());
+    }
+
+    #[test]
+    fn deliberate_fts_syntax_is_preserved() {
+        let db = fixture();
+        assert_eq!(names(&db, "nacer OR nobody"), ["Nacer Djaghmoum"]);
+        assert_eq!(names(&db, "name:nacer"), ["Nacer Djaghmoum"]);
+        assert_eq!(names(&db, "nac*"), ["Nacer Djaghmoum"]);
+        // Valid syntax that genuinely matches nothing stays empty.
+        assert!(names(&db, "nacer AND nobody").is_empty());
+    }
+
+    #[test]
+    fn unsearchable_input_is_empty_not_an_error() {
+        let db = fixture();
+        assert!(names(&db, "").is_empty());
+        assert!(names(&db, "  ?! ").is_empty());
+    }
+
+    #[test]
+    fn plain_text_query_quotes_each_word() {
+        assert_eq!(plain_text_query("nacer@x.com").as_deref(), Some(r#""nacer" "com""#));
+        assert_eq!(plain_text_query("mimi's laptop").as_deref(), Some(r#""mimi" "laptop""#));
+        // Nothing but short terms — keep them rather than searching for nothing.
+        assert_eq!(plain_text_query("x y").as_deref(), Some(r#""x" "y""#));
+        assert_eq!(plain_text_query("  ?! "), None);
+        assert_eq!(plain_text_query(""), None);
+    }
 }
