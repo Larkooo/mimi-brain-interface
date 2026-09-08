@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { CronJob } from '../../hooks/useApi'
-import { getCrons, createCron, deleteCron, toggleCron } from '../../hooks/useApi'
+import { getCrons, createCron, deleteCron, toggleCron, runCron } from '../../hooks/useApi'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Plus, Trash2, Power, Clock } from 'lucide-react'
+import { Plus, Trash2, Power, Clock, Play } from 'lucide-react'
 
 const SCHEDULE_PRESETS = [
   { label: 'Every 5 min', value: '*/5 * * * *' },
@@ -23,19 +23,37 @@ export function CronsView() {
   const [customSchedule, setCustomSchedule] = useState('')
   const [prompt, setPrompt] = useState('')
   const [description, setDescription] = useState('')
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     try { setCrons(await getCrons()) } catch {}
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  // Poll so a job's status flips from `running` to its outcome on its own.
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 15000)
+    return () => clearInterval(t)
+  }, [refresh])
 
   const handleCreate = async () => {
     const sched = schedule || customSchedule
     if (!name.trim() || !sched.trim() || !prompt.trim()) return
-    await createCron(name, sched, prompt, description)
+    try {
+      await createCron(name, sched, prompt, description)
+    } catch (e) {
+      // The server rejects cron expressions the scheduler can't parse.
+      setError(e instanceof Error ? e.message : String(e))
+      return
+    }
+    setError(null)
     setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
     setAdding(false)
+    refresh()
+  }
+
+  const handleRun = async (id: string) => {
+    try { await runCron(id) } catch {}
     refresh()
   }
 
@@ -123,6 +141,10 @@ export function CronsView() {
             className="bg-muted/40 border-border"
           />
 
+          {error && (
+            <div className="text-[11px] text-danger">{error}</div>
+          )}
+
           <div className="flex gap-2">
             <Button size="sm" onClick={handleCreate}
               disabled={!name.trim() || !(schedule || customSchedule).trim() || !prompt.trim()}>
@@ -158,6 +180,13 @@ export function CronsView() {
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
                   <button
+                    className="p-1.5 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-colors"
+                    onClick={() => handleRun(cron.id)}
+                    title="Run now"
+                  >
+                    <Play size={13} />
+                  </button>
+                  <button
                     className={`p-1.5 rounded-md transition-colors ${cron.enabled ? 'text-success hover:bg-accent' : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent'}`}
                     onClick={() => handleToggle(cron.id)}
                     title={cron.enabled ? 'Disable' : 'Enable'}
@@ -177,10 +206,33 @@ export function CronsView() {
                 <p className="text-[11px] text-muted-foreground mt-1.5 ml-4">{cron.description}</p>
               )}
               <div className="text-[11px] text-muted-foreground/70 mt-1 ml-4 line-clamp-2">{cron.prompt}</div>
+              <div className="flex items-center gap-3 text-[10px] text-muted-foreground/60 mt-1.5 ml-4">
+                <span>last {formatWhen(cron.last_run)}</span>
+                {cron.last_status && <StatusPill status={cron.last_status} />}
+                <span>next {cron.enabled ? formatWhen(cron.next_run) : 'paused'}</span>
+              </div>
             </div>
           ))}
         </div>
       )}
     </div>
   )
+}
+
+function formatWhen(iso: string | null): string {
+  if (!iso) return 'never'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString(undefined, {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
+  })
+}
+
+function StatusPill({ status }: { status: string }) {
+  const color = status === 'ok'
+    ? 'text-success'
+    : status === 'running'
+      ? 'text-muted-foreground'
+      : 'text-danger'
+  return <span className={color} title={status}>{status === 'ok' ? '✓ ok' : status}</span>
 }

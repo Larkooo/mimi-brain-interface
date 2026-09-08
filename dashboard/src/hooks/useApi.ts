@@ -183,6 +183,12 @@ export interface CronJob {
   prompt: string;
   description: string;
   enabled: boolean;
+  /** RFC3339, set by the scheduler when it last started this job. */
+  last_run: string | null;
+  /** 'ok' | 'running' | 'failed: ...' */
+  last_status: string | null;
+  /** RFC3339 of the next fire time, null when disabled or unreachable. */
+  next_run: string | null;
 }
 
 export async function getCrons(): Promise<CronJob[]> {
@@ -203,6 +209,10 @@ export async function deleteCron(id: string) {
 
 export async function toggleCron(id: string) {
   return api(`/api/crons/${id}/toggle`, { method: 'POST' });
+}
+
+export async function runCron(id: string) {
+  return api(`/api/crons/${id}/run`, { method: 'POST' });
 }
 
 // --- Secrets ---
