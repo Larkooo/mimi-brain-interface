@@ -9,15 +9,17 @@ pub fn run() {
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let archive = backups.join(format!("mimi_backup_{}.tar.gz", timestamp));
 
+    // NOTE: `--exclude` is positional in GNU tar — it only applies to operands
+    // that follow it. Passing it after `.mimi` makes tar warn "has no effect"
+    // and exit 2, which killed every backup. Keep it ahead of the member name.
     let status = Command::new("tar")
         .args([
             "czf",
             archive.to_str().unwrap(),
+            "--exclude=.mimi/backups",
             "-C",
             home.parent().unwrap().to_str().unwrap(),
             ".mimi",
-            "--exclude",
-            ".mimi/backups",
         ])
         .status()
         .expect("failed to create backup");
@@ -29,7 +31,10 @@ pub fn run() {
         println!("Backup created: {}", archive.display());
         println!("Size: {:.1} KB", size as f64 / 1024.0);
     } else {
-        eprintln!("Backup failed");
+        // tar writes a partial archive before bailing out. Leaving it behind is
+        // worse than no backup at all — it looks like a restore point.
+        let _ = std::fs::remove_file(&archive);
+        eprintln!("Backup failed: tar exited with {}", status);
         std::process::exit(1);
     }
 }
