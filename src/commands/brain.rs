@@ -138,6 +138,74 @@ pub fn search(query: &str) {
     }
 }
 
+pub fn show(id: i64) {
+    ensure_brain();
+    let conn = db::open();
+    let entity = match db::get_entity(&conn, id) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let nb = match db::get_neighborhood(&conn, id) {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("=== #{} {} ({}) ===", entity.id, entity.name, entity.r#type);
+    println!("  created: {}", entity.created_at);
+    println!("  updated: {}", entity.updated_at);
+
+    if !(entity.properties.is_object()
+        && entity.properties.as_object().unwrap().is_empty())
+    {
+        println!("\nProperties:");
+        match serde_json::to_string_pretty(&entity.properties) {
+            Ok(s) => {
+                for line in s.lines() {
+                    println!("  {line}");
+                }
+            }
+            Err(_) => println!("  {}", entity.properties),
+        }
+    }
+
+    if !nb.outgoing.is_empty() {
+        println!("\nOutgoing ({}):", nb.outgoing.len());
+        for r in &nb.outgoing {
+            println!(
+                "  --[{}]--> #{:<4} {:12} {}",
+                r.r#type, r.other_id, r.other_type, r.other_name
+            );
+        }
+    }
+
+    if !nb.incoming.is_empty() {
+        println!("\nIncoming ({}):", nb.incoming.len());
+        for r in &nb.incoming {
+            println!(
+                "  <--[{}]-- #{:<4} {:12} {}",
+                r.r#type, r.other_id, r.other_type, r.other_name
+            );
+        }
+    }
+
+    if !nb.memory_files.is_empty() {
+        println!("\nMemory files ({}):", nb.memory_files.len());
+        for f in &nb.memory_files {
+            println!("  {f}");
+        }
+    }
+
+    if nb.outgoing.is_empty() && nb.incoming.is_empty() && nb.memory_files.is_empty() {
+        println!("\n(no relationships or memory refs)");
+    }
+}
+
 pub fn list(entity_type: Option<&str>) {
     ensure_brain();
     let conn = db::open();

@@ -114,6 +114,87 @@ pub fn find_entities(db: &Connection, entity_type: Option<&str>) -> Result<Vec<E
         .collect())
 }
 
+pub fn get_entity(db: &Connection, id: i64) -> Result<Entity, String> {
+    db.query_row(
+        "SELECT id, type, name, properties, created_at, updated_at \
+         FROM entities WHERE id = ?1",
+        params![id],
+        row_to_entity,
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => format!("entity #{id} not found"),
+        other => format!("failed to load entity: {other}"),
+    })
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RelatedEntity {
+    /// The relationship row id.
+    pub rel_id: i64,
+    pub r#type: String,
+    pub other_id: i64,
+    pub other_name: String,
+    pub other_type: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EntityNeighborhood {
+    pub outgoing: Vec<RelatedEntity>,
+    pub incoming: Vec<RelatedEntity>,
+    pub memory_files: Vec<String>,
+}
+
+pub fn get_neighborhood(db: &Connection, id: i64) -> Result<EntityNeighborhood, String> {
+    let mut out_stmt = db
+        .prepare(
+            "SELECT r.id, r.type, e.id, e.name, e.type, r.created_at \
+             FROM relationships r JOIN entities e ON e.id = r.target_id \
+             WHERE r.source_id = ?1 ORDER BY r.created_at",
+        )
+        .map_err(|e| format!("prepare outgoing query: {e}"))?;
+    let outgoing: Vec<RelatedEntity> = out_stmt
+        .query_map(params![id], row_to_related)
+        .map_err(|e| format!("outgoing query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut in_stmt = db
+        .prepare(
+            "SELECT r.id, r.type, e.id, e.name, e.type, r.created_at \
+             FROM relationships r JOIN entities e ON e.id = r.source_id \
+             WHERE r.target_id = ?1 ORDER BY r.created_at",
+        )
+        .map_err(|e| format!("prepare incoming query: {e}"))?;
+    let incoming: Vec<RelatedEntity> = in_stmt
+        .query_map(params![id], row_to_related)
+        .map_err(|e| format!("incoming query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut mem_stmt = db
+        .prepare("SELECT file_path FROM memory_refs WHERE entity_id = ?1 ORDER BY created_at")
+        .map_err(|e| format!("prepare memory_refs query: {e}"))?;
+    let memory_files: Vec<String> = mem_stmt
+        .query_map(params![id], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("memory_refs query: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(EntityNeighborhood { outgoing, incoming, memory_files })
+}
+
+fn row_to_related(row: &rusqlite::Row) -> rusqlite::Result<RelatedEntity> {
+    Ok(RelatedEntity {
+        rel_id: row.get(0)?,
+        r#type: row.get(1)?,
+        other_id: row.get(2)?,
+        other_name: row.get(3)?,
+        other_type: row.get(4)?,
+        created_at: row.get(5)?,
+    })
+}
+
 pub fn search_entities(db: &Connection, query: &str) -> Result<Vec<Entity>, String> {
     let mut stmt = db
         .prepare(
