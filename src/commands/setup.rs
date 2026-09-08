@@ -40,6 +40,7 @@ pub fn run() {
             "model": "sonnet",
             "session_name": "mimi",
             "dashboard_port": 3131,
+            "owner_tz": "America/Chicago",
         });
         fs::write(
             paths::config_file(),
