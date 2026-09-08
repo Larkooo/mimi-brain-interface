@@ -40,15 +40,34 @@ pub fn plugin_list_output() -> Result<String, String> {
     try_run_claude_output(&["plugin", "list"])
 }
 
+/// Outcome of a `launch_tmux` call.
+pub enum LaunchOutcome {
+    /// A fresh tmux session was created.
+    Created,
+    /// A session with this name was already running — left untouched.
+    AlreadyRunning,
+}
+
 /// Launch an interactive claude in a tmux session.
 /// Channels run out-of-process — use `mimi channel start <name>` for those.
-pub fn launch_tmux(session_name: &str) -> Result<(), String> {
+///
+/// If a session with the given name is already running it is left in place
+/// (returning `AlreadyRunning`) rather than killed and recreated. Restarting
+/// a live session would terminate an in-flight Claude process, aborting any
+/// streaming response or tool call. Callers that want a fresh start should
+/// stop the session explicitly first (`mimi` has no command for this — use
+/// `tmux kill-session -t <name>` or the dashboard's stop button).
+pub fn launch_tmux(session_name: &str) -> Result<LaunchOutcome, String> {
     let mimi_home = crate::paths::home();
 
-    Command::new("tmux")
-        .args(["kill-session", "-t", session_name])
+    let already_running = Command::new("tmux")
+        .args(["has-session", "-t", session_name])
         .output()
-        .ok();
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if already_running {
+        return Ok(LaunchOutcome::AlreadyRunning);
+    }
 
     let claude_cmd = "claude --resume --dangerously-skip-permissions";
 
@@ -66,7 +85,7 @@ pub fn launch_tmux(session_name: &str) -> Result<(), String> {
         .map_err(|e| format!("failed to start tmux: {e}"))?;
 
     if status.success() {
-        Ok(())
+        Ok(LaunchOutcome::Created)
     } else {
         Err("tmux session creation failed".to_string())
     }
