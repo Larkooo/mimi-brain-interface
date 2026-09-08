@@ -650,11 +650,58 @@ async fn api_logs_tail(axum::extract::Path(name): axum::extract::Path<String>)
 {
     let path = LOG_FILES.iter().find(|(n, _)| *n == name).map(|(_, p)| *p)
         .ok_or((StatusCode::NOT_FOUND, format!("unknown log: {name}")))?;
-    let contents = fs::read_to_string(path).unwrap_or_default();
-    let lines: Vec<&str> = contents.lines().collect();
-    let tail_start = lines.len().saturating_sub(500);
-    let text = lines[tail_start..].join("\n");
-    Ok(Json(serde_json::json!({ "name": name, "path": path, "text": text, "lines": lines.len() })))
+    let lines = read_tail_lines(std::path::Path::new(path), 500);
+    let line_count = lines.len();
+    let text = lines.join("\n");
+    Ok(Json(serde_json::json!({ "name": name, "path": path, "text": text, "lines": line_count })))
+}
+
+/// Read approximately the last `limit` newline-separated lines from `path`
+/// without loading the whole file. Touches at most ~512 KiB at the tail —
+/// the dashboard polls `tailLog` every 2 s on whichever log is selected, so
+/// slurping a multi-MB telegram/discord log on each tick was wasted disk I/O.
+/// Drops the leading partial line when the cap was hit. Chronological order.
+fn read_tail_lines(path: &std::path::Path, limit: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    // 512 KiB comfortably fits 500 typical log lines (≈1 KiB each, and most
+    // mimi log lines are much shorter). A single line longer than the cap
+    // would be dropped, which is fine for service logs.
+    const MAX_TAIL_BYTES: u64 = 512 * 1024;
+
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let total = match file.seek(SeekFrom::End(0)) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let to_read = MAX_TAIL_BYTES.min(total);
+    let from_start = to_read >= total;
+    if file.seek(SeekFrom::Start(total - to_read)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; to_read as usize];
+    if file.read_exact(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // split() on a trailing newline yields an empty tail element — drop it.
+    if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    // First line is potentially partial unless we reached the start of file.
+    if !from_start && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let start = lines.len().saturating_sub(limit);
+    lines[start..].iter().map(|s| s.to_string()).collect()
 }
 
 // --- Services (systemd user) ---
