@@ -61,7 +61,7 @@ export function SecretsView() {
           <Input
             placeholder="Secret name (e.g. OPENAI_API_KEY)"
             value={name}
-            onChange={e => setName(e.target.value.replace(/[^a-zA-Z0-9_\-.]/, ''))}
+            onChange={e => setName(e.target.value.replace(/[^a-zA-Z0-9_\-.]/g, '').replace(/\.{2,}/g, '.').replace(/^\.+/, ''))}
             className="bg-muted/40 border-border font-mono"
           />
 
