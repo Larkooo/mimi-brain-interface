@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -1032,14 +1032,48 @@ async fn run_gateway(
     let write = std::sync::Arc::new(tokio::sync::Mutex::new(write));
 
     // Heartbeat task
+    //
+    // Discord ACKs every op 1 with an op 11. If an ACK doesn't land before
+    // the next heartbeat is due the connection is a zombie: the TCP socket
+    // is dead but nothing surfaced an error, so `read.next()` would block
+    // forever and Mimi would go silently deaf on Discord until someone
+    // noticed and restarted the service. Per the gateway spec we tear the
+    // connection down ourselves and let the caller reconnect.
     let hb_write = std::sync::Arc::clone(&write);
     let last_seq = std::sync::Arc::new(tokio::sync::RwLock::new(None::<u64>));
     let hb_seq = std::sync::Arc::clone(&last_seq);
+    let awaiting_ack = std::sync::Arc::new(AtomicBool::new(false));
+    let hb_ack = std::sync::Arc::clone(&awaiting_ack);
+    // Signals the read loop that the connection is dead. Also fires (as a
+    // closed channel) if the heartbeat task exits because the socket
+    // refused a write — same conclusion, different symptom.
+    let (zombie_tx, mut zombie_rx) = tokio::sync::oneshot::channel::<()>();
     let hb_task = tokio::spawn(async move {
+        // ACKs are observed by the read loop, which can legitimately stall
+        // for a while (fetching a fat attachment, a slow REST call). Two
+        // consecutive misses — ~80s at Discord's usual 41s cadence — means
+        // the socket really is gone, not just busy.
+        const MAX_MISSED_ACKS: u32 = 2;
+        let mut missed = 0u32;
         let mut ticker = tokio::time::interval(Duration::from_millis(heartbeat_ms));
         ticker.tick().await; // fire the immediate tick
         loop {
             ticker.tick().await;
+            // swap returns the previous value: `true` means the heartbeat
+            // we sent one interval ago was never ACKed.
+            if hb_ack.swap(true, Ordering::SeqCst) {
+                missed += 1;
+                eprintln!(
+                    "discord: heartbeat ACK missed ({missed}/{MAX_MISSED_ACKS}) after {heartbeat_ms}ms"
+                );
+                if missed >= MAX_MISSED_ACKS {
+                    eprintln!("discord: no heartbeat ACK — connection is dead");
+                    let _ = zombie_tx.send(());
+                    return;
+                }
+            } else {
+                missed = 0;
+            }
             let seq = *hb_seq.read().await;
             let msg = json!({ "op": 1, "d": seq });
             let mut w = hb_write.lock().await;
@@ -1069,16 +1103,40 @@ async fn run_gateway(
         }
     });
 
+    // Tear down the per-connection tasks and hand the reason back to the
+    // caller, which sleeps and reconnects. Every exit path from the read
+    // loop goes through here so we don't leak tasks across reconnects.
+    macro_rules! bail_gateway {
+        ($($arg:tt)*) => {{
+            hb_task.abort();
+            drain_task.abort();
+            return Err(format!($($arg)*));
+        }};
+    }
+
     // Main event loop
-    while let Some(msg) = read.next().await {
-        let msg = msg.map_err(|e| format!("ws read: {e}"))?;
+    loop {
+        let msg = tokio::select! {
+            biased;
+            // The heartbeat task gave up on this socket — don't keep
+            // waiting on a read that will never complete. A dropped
+            // sender means it exited on a failed write, same verdict.
+            res = &mut zombie_rx => match res {
+                Ok(()) => bail_gateway!("heartbeat ACK timeout"),
+                Err(_) => bail_gateway!("heartbeat task stopped — socket write failed"),
+            },
+            next = read.next() => match next {
+                Some(m) => m,
+                None => bail_gateway!("gateway stream ended"),
+            },
+        };
+        let msg = match msg {
+            Ok(m) => m,
+            Err(e) => bail_gateway!("ws read: {e}"),
+        };
         let text = match msg {
             Message::Text(t) => t.to_string(),
-            Message::Close(_) => {
-                hb_task.abort();
-                drain_task.abort();
-                return Err("gateway closed".into());
-            }
+            Message::Close(_) => bail_gateway!("gateway closed"),
             _ => continue,
         };
         let v: Value = match serde_json::from_str(&text) { Ok(v) => v, Err(_) => continue };
@@ -1086,7 +1144,34 @@ async fn run_gateway(
             *last_seq.write().await = Some(s);
         }
         let op = v.get("op").and_then(|x| x.as_u64()).unwrap_or(0);
-        if op != 0 { continue; } // 0 = dispatched event
+        match op {
+            0 => {} // dispatched event — handled below
+            // Heartbeat ACK: the connection is alive.
+            11 => {
+                awaiting_ack.store(false, Ordering::SeqCst);
+                continue;
+            }
+            // Discord asking for an immediate heartbeat. Answer on the
+            // spot; the ticker keeps its own cadence. We deliberately
+            // don't arm `awaiting_ack` here — the ACK for this beat would
+            // otherwise race the ticker and read as a false zombie.
+            1 => {
+                let seq = *last_seq.read().await;
+                let ping = json!({ "op": 1, "d": seq });
+                let mut w = write.lock().await;
+                if w.send(Message::Text(ping.to_string().into())).await.is_err() {
+                    drop(w);
+                    bail_gateway!("failed to answer heartbeat request");
+                }
+                continue;
+            }
+            // Reconnect / invalid session — Discord wants a fresh
+            // connection. The caller's 5s backoff covers the op 9
+            // re-identify delay the spec asks for.
+            7 => bail_gateway!("gateway requested reconnect (op 7)"),
+            9 => bail_gateway!("gateway invalidated the session (op 9)"),
+            _ => continue,
+        }
         let event = v.get("t").and_then(|x| x.as_str()).unwrap_or("");
 
         if event == "READY" {
@@ -1401,8 +1486,4 @@ async fn run_gateway(
         );
         let _ = to_claude.send(UserTurn { text: wrapped, images, chat_id: channel_id }).await;
     }
-
-    hb_task.abort();
-    drain_task.abort();
-    Err("gateway stream ended".into())
 }
