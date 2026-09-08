@@ -65,7 +65,7 @@ enum Commands {
         #[command(subcommand)]
         command: SecretCommands,
     },
-    /// Manage background tasks spawned by the channel agent
+    /// Manage background tasks (shared store: brain.db, same as the dashboard)
     Task {
         #[command(subcommand)]
         command: TaskCommands,
@@ -274,7 +274,7 @@ enum TaskCommands {
         /// Message to append
         message: String,
     },
-    /// Update a task's status (pending|running|done|failed|cancelled)
+    /// Update a task's status (pending|running|blocked|done|failed|cancelled)
     Update {
         /// Task id
         id: String,
