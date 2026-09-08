@@ -395,18 +395,31 @@ pub async fn api_update(
     let refs: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
     db.execute(&sql, refs.as_slice()).map_err(to_err)?;
 
-    db.execute(
-        "INSERT INTO task_updates(task_id, status_before, status_after, author, note) \
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![
-            id,
-            current_status,
-            req.status.clone().unwrap_or_else(|| current_status.clone()),
-            req.author.as_deref().unwrap_or("web"),
-            req.note,
-        ],
-    )
-    .map_err(to_err)?;
+    // Only record a task_updates row when something audit-worthy happened: a
+    // real status transition, or an explicit note. Without this guard a PATCH
+    // that only nudged progress/assignee — or an empty PATCH — wrote a
+    // phantom `current → current` row and pumped noise into the per-task log.
+    let status_changed = req
+        .status
+        .as_deref()
+        .is_some_and(|s| s != current_status);
+    let note = req.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if status_changed || note.is_some() {
+        let status_before = status_changed.then(|| current_status.as_str());
+        let status_after = status_changed.then(|| req.status.as_deref().unwrap_or(&current_status));
+        db.execute(
+            "INSERT INTO task_updates(task_id, status_before, status_after, author, note) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                id,
+                status_before,
+                status_after,
+                req.author.as_deref().unwrap_or("web"),
+                note,
+            ],
+        )
+        .map_err(to_err)?;
+    }
 
     let task: Task = db
         .query_row(
