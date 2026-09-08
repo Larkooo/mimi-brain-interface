@@ -472,6 +472,40 @@ fn mark_failed(dir: &Path, meta: &mut Meta, code: Option<i32>) {
     let _ = write_meta(dir, meta);
 }
 
+/// Open the write end of the FIFO without ever blocking on a missing reader.
+///
+/// A plain `open(O_WRONLY)` on a FIFO blocks until a reader attaches. The
+/// supervisor normally holds the read end open `O_RDWR` for its whole life, so
+/// this returns immediately — but if the supervisor is gone the open would
+/// hang forever, wedging the CLI and (via `POST /api/subagents/:id/send`)
+/// parking a tokio worker thread permanently.
+///
+/// So we open `O_NONBLOCK`, which turns "no reader" into an immediate ENXIO,
+/// then clear `O_NONBLOCK` on the returned fd so the subsequent write keeps
+/// ordinary blocking semantics against a full pipe buffer.
+fn open_fifo_write(path: &Path) -> Result<fs::File, String> {
+    let cpath = CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|e| format!("path nul: {e}"))?;
+    let fd: RawFd = unsafe {
+        libc::open(cpath.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK | libc::O_CLOEXEC)
+    };
+    if fd < 0 {
+        let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::ENXIO) {
+            return Err("supervisor is not reading the fifo (agent is not alive)".into());
+        }
+        return Err(format!("open fifo {}: {err}", path.display()));
+    }
+    let file = unsafe { fs::File::from_raw_fd(fd) };
+    // Drop O_NONBLOCK so write_all blocks rather than returning EAGAIN when
+    // the pipe buffer is momentarily full.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags >= 0 {
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK) };
+    }
+    Ok(file)
+}
+
 fn open_fifo_rw(path: &Path) -> Result<OwnedFd, String> {
     let cpath = CString::new(path.to_string_lossy().as_bytes())
         .map_err(|e| format!("path nul: {e}"))?;
@@ -485,6 +519,11 @@ fn open_fifo_rw(path: &Path) -> Result<OwnedFd, String> {
 // ---------- send / stop / list / show ----------
 
 pub fn send(id: &str, message: &str) -> Result<(), String> {
+    // Reconcile status against pid liveness first. Without this, an agent
+    // whose supervisor died without finalizing meta.json (OOM kill, SIGKILL,
+    // host reboot) is still reported "running", and the FIFO open below would
+    // block forever waiting for a reader that will never come.
+    reap_if_dead(id);
     let meta = read_meta(id)?;
     if meta.status != "running" {
         return Err(format!("agent {id} is {} (not running)", meta.status));
@@ -495,10 +534,7 @@ pub fn send(id: &str, message: &str) -> Result<(), String> {
         "message": { "role": "user", "content": message },
     });
     let line = format!("{}\n", payload);
-    let mut f = fs::OpenOptions::new()
-        .write(true)
-        .open(fifo_path(&dir))
-        .map_err(|e| format!("open fifo: {e}"))?;
+    let mut f = open_fifo_write(&fifo_path(&dir))?;
     f.write_all(line.as_bytes()).map_err(|e| format!("write fifo: {e}"))?;
     Ok(())
 }
