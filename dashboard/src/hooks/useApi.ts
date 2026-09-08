@@ -183,6 +183,8 @@ export interface CronJob {
   prompt: string;
   description: string;
   enabled: boolean;
+  last_run: string | null;
+  last_status: string | null;
 }
 
 export async function getCrons(): Promise<CronJob[]> {
@@ -203,6 +205,10 @@ export async function deleteCron(id: string) {
 
 export async function toggleCron(id: string) {
   return api(`/api/crons/${id}/toggle`, { method: 'POST' });
+}
+
+export async function runCron(id: string) {
+  return api(`/api/crons/${id}/run`, { method: 'POST' });
 }
 
 // --- Secrets ---

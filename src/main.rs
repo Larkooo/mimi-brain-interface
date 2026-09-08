@@ -3,6 +3,7 @@ mod channels;
 mod claude;
 mod commands;
 mod context_buffer;
+mod crons;
 mod dashboard;
 mod paths;
 mod subagents;
@@ -93,6 +94,24 @@ enum Commands {
         #[command(subcommand)]
         command: SubagentCommands,
     },
+    /// Manage scheduled prompts (the dashboard's "Schedules" tab)
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// List scheduled prompts and when they last ran
+    List,
+    /// Run a schedule now, ignoring its cron expression
+    Run {
+        /// Schedule id or name
+        id: String,
+    },
+    /// Run the scheduler loop in the foreground (also runs inside `mimi dashboard`)
+    Daemon,
 }
 
 #[derive(Subcommand)]
@@ -494,6 +513,11 @@ async fn main() {
             SubagentCommands::Tail { id } => subagents::cli_tail(&id),
             SubagentCommands::Stop { id } => subagents::cli_stop(&id),
             SubagentCommands::Rm { id } => subagents::cli_rm(&id),
+        },
+        Some(Commands::Cron { command }) => match command {
+            CronCommands::List => crons::cli_list(),
+            CronCommands::Run { id } => crons::cli_run(&id),
+            CronCommands::Daemon => crons::cli_daemon().await,
         },
     }
 }

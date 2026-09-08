@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { CronJob } from '../../hooks/useApi'
-import { getCrons, createCron, deleteCron, toggleCron } from '../../hooks/useApi'
+import { getCrons, createCron, deleteCron, toggleCron, runCron } from '../../hooks/useApi'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Plus, Trash2, Power, Clock } from 'lucide-react'
+import { Plus, Trash2, Power, Clock, Play } from 'lucide-react'
 
 const SCHEDULE_PRESETS = [
   { label: 'Every 5 min', value: '*/5 * * * *' },
@@ -15,6 +15,14 @@ const SCHEDULE_PRESETS = [
   { label: 'Custom', value: '' },
 ]
 
+function formatAge(iso: string): string {
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  if (secs < 60) return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
 export function CronsView() {
   const [crons, setCrons] = useState<CronJob[]>([])
   const [adding, setAdding] = useState(false)
@@ -23,6 +31,7 @@ export function CronsView() {
   const [customSchedule, setCustomSchedule] = useState('')
   const [prompt, setPrompt] = useState('')
   const [description, setDescription] = useState('')
+  const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try { setCrons(await getCrons()) } catch {}
@@ -33,10 +42,24 @@ export function CronsView() {
   const handleCreate = async () => {
     const sched = schedule || customSchedule
     if (!name.trim() || !sched.trim() || !prompt.trim()) return
-    await createCron(name, sched, prompt, description)
+    try {
+      await createCron(name, sched, prompt, description)
+    } catch (e) {
+      // The API rejects expressions the scheduler can't run, so the job never
+      // silently sits there never firing.
+      setError(e instanceof Error ? e.message : 'Failed to create schedule')
+      return
+    }
+    setError('')
     setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
     setAdding(false)
     refresh()
+  }
+
+  const handleRun = async (id: string) => {
+    await runCron(id)
+    // The run is async server-side; give it a beat before re-reading status.
+    setTimeout(refresh, 1500)
   }
 
   const handleDelete = async (id: string) => {
@@ -123,6 +146,10 @@ export function CronsView() {
             className="bg-muted/40 border-border"
           />
 
+          {error && (
+            <p className="text-[11px] text-danger">{error}</p>
+          )}
+
           <div className="flex gap-2">
             <Button size="sm" onClick={handleCreate}
               disabled={!name.trim() || !(schedule || customSchedule).trim() || !prompt.trim()}>
@@ -158,6 +185,13 @@ export function CronsView() {
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
                   <button
+                    className="p-1.5 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-colors"
+                    onClick={() => handleRun(cron.id)}
+                    title="Run now"
+                  >
+                    <Play size={13} />
+                  </button>
+                  <button
                     className={`p-1.5 rounded-md transition-colors ${cron.enabled ? 'text-success hover:bg-accent' : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent'}`}
                     onClick={() => handleToggle(cron.id)}
                     title={cron.enabled ? 'Disable' : 'Enable'}
@@ -177,6 +211,20 @@ export function CronsView() {
                 <p className="text-[11px] text-muted-foreground mt-1.5 ml-4">{cron.description}</p>
               )}
               <div className="text-[11px] text-muted-foreground/70 mt-1 ml-4 line-clamp-2">{cron.prompt}</div>
+              <div className="text-[10px] text-muted-foreground/60 mt-1.5 ml-4">
+                {cron.last_run ? (
+                  <>
+                    last run {formatAge(cron.last_run)}
+                    {cron.last_status && (
+                      <span className={cron.last_status === 'ok' || cron.last_status === 'running'
+                        ? 'text-muted-foreground/60'
+                        : 'text-danger'}> · {cron.last_status}</span>
+                    )}
+                  </>
+                ) : (
+                  'never run'
+                )}
+              </div>
             </div>
           ))}
         </div>
