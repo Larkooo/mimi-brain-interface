@@ -1,8 +1,9 @@
 //! Task manager endpoints.
 //!
-//! Backed by `tasks` + `task_updates` tables in brain.db (also managed by
-//! `~/.mimi/bin/task`). Infinite parent/child depth, status lifecycle, and
-//! an append-only update log per task.
+//! Backed by the `tasks` + `task_updates` tables in brain.db — the same store
+//! `mimi task` and `~/.mimi/bin/task` use (schema lives in `crate::tasks`).
+//! Infinite parent/child depth, status lifecycle, and an append-only update
+//! log per task.
 
 use axum::{
     Json,
@@ -15,44 +16,8 @@ use std::collections::HashMap;
 
 use crate::brain;
 
-const SCHEMA: &str = r#"
-CREATE TABLE IF NOT EXISTS tasks (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  parent_id INTEGER REFERENCES tasks(id) ON DELETE CASCADE,
-  title TEXT NOT NULL,
-  description TEXT DEFAULT '',
-  status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','running','blocked','done','failed','cancelled')),
-  origin_channel TEXT,
-  origin_chat_id TEXT,
-  origin_user TEXT,
-  assignee TEXT,
-  depth INTEGER DEFAULT 0,
-  progress INTEGER DEFAULT 0,
-  metadata TEXT DEFAULT '{}',
-  created_at TEXT DEFAULT (datetime('now')),
-  updated_at TEXT DEFAULT (datetime('now')),
-  started_at TEXT,
-  completed_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_tasks_parent ON tasks(parent_id);
-CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
-
-CREATE TABLE IF NOT EXISTS task_updates (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  note TEXT,
-  status_before TEXT,
-  status_after TEXT,
-  author TEXT,
-  created_at TEXT DEFAULT (datetime('now'))
-);
-CREATE INDEX IF NOT EXISTS idx_updates_task ON task_updates(task_id);
-"#;
-
 pub fn ensure_schema() {
-    let db = brain::open();
-    db.execute_batch(SCHEMA).ok();
+    crate::tasks::ensure_schema();
 }
 
 #[derive(Serialize)]
