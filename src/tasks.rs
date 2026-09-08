@@ -182,6 +182,27 @@ pub fn stop(id: &str) -> Result<(), String> {
     update_status(id, Status::Cancelled).map(|_| ())
 }
 
+/// Remove a task's metadata + log files from disk. Refuses if the task is
+/// still `Running` — call `stop` first so the spawned process gets SIGTERM
+/// before its bookkeeping is gone. Missing log files are tolerated; missing
+/// metadata is an error (so the user knows the id was wrong).
+pub fn delete(id: &str) -> Result<(), String> {
+    let task = load(id)?;
+    if task.status == Status::Running {
+        return Err(format!(
+            "task {id} is still running — `mimi task stop {id}` first, then delete"
+        ));
+    }
+    fs::remove_file(meta_path(id))
+        .map_err(|e| format!("failed to remove metadata for {id}: {e}"))?;
+    let log = log_path(id);
+    if log.exists() {
+        fs::remove_file(&log)
+            .map_err(|e| format!("failed to remove log for {id}: {e}"))?;
+    }
+    Ok(())
+}
+
 // --- CLI entry points ---
 
 pub fn cli_new(title: &str, spawner: &str) {
@@ -278,5 +299,15 @@ pub fn cli_result(id: &str, text: &str) {
     if let Err(e) = set_result(id, text) {
         eprintln!("{e}");
         std::process::exit(1);
+    }
+}
+
+pub fn cli_delete(id: &str) {
+    match delete(id) {
+        Ok(()) => println!("deleted task {id}"),
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     }
 }
