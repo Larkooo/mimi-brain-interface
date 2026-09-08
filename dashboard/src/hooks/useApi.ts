@@ -504,6 +504,7 @@ export interface SubagentMeta {
   pid: number | null;
   claude_pid: number | null;
   exit_code: number | null;
+  report_channel_id: string | null;
 }
 
 export interface SubagentDetail {
@@ -520,7 +521,13 @@ export async function getSubagent(id: string): Promise<SubagentDetail> {
   return api(`/api/subagents/${encodeURIComponent(id)}`);
 }
 
-export async function spawnSubagent(body: { name: string; prompt: string; model?: string; cwd?: string }): Promise<{ id: string }> {
+export async function spawnSubagent(body: {
+  name: string;
+  prompt: string;
+  model?: string;
+  cwd?: string;
+  report_thread_parent?: string;
+}): Promise<{ id: string }> {
   return api('/api/subagents/spawn', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
