@@ -259,10 +259,21 @@ async fn api_brain_query(
     Json(body): Json<QueryBody>,
 ) -> Result<Json<Vec<Vec<(String, String)>>>, (StatusCode, String)> {
     let sql = body.sql.trim();
-    if !(sql.to_uppercase().starts_with("SELECT") || sql.to_uppercase().starts_with("WITH")) {
-        return Err((StatusCode::BAD_REQUEST, "Only SELECT/WITH queries allowed via API".to_string()));
-    }
     let db = brain::open();
+    // Ask SQLite itself whether this statement can modify the database.
+    // A prefix check on "SELECT"/"WITH" is bypassable by modifying CTEs
+    // (`WITH x AS (...) DELETE FROM entities`), which sqlite3_stmt_readonly
+    // correctly classifies as a writer.
+    let stmt = db
+        .prepare(sql)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid SQL: {e}")))?;
+    if !stmt.readonly() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Only read-only queries are allowed via the dashboard API".to_string(),
+        ));
+    }
+    drop(stmt);
     let rows = brain::raw_query(&db, sql)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(rows))
