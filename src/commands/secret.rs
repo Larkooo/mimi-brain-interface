@@ -161,26 +161,24 @@ pub fn get(name: &str) {
     }
 }
 
-/// List secret names (never values)
+/// List secret names (never values).
+///
+/// Each entry is rendered as `  NAME\tCREATED_AT` so the line is also
+/// machine-parseable: the dashboard's `list_json` shells out to this command
+/// (since the secrets dir is unreadable to non-vault users) and splits on the
+/// tab to recover both fields. Keep the tab separator and the two-space
+/// prefix in sync with the parser in `list_json` below.
 pub fn list() {
     if is_vault_user() {
         // Running as vault user — list directly
-        let dir = vault_secrets_dir();
-        let mut names: Vec<String> = fs::read_dir(&dir)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .filter(|e| e.path().is_file())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        names.sort();
-        if names.is_empty() {
+        let entries = scan_secrets();
+        if entries.is_empty() {
             println!("No secrets stored.");
         } else {
-            for name in &names {
-                println!("  {}", name);
+            for (name, created_at) in &entries {
+                println!("  {}\t{}", name, created_at);
             }
-            println!("\n{} secret(s). Values are encrypted — use 'mimi secret run' to inject.", names.len());
+            println!("\n{} secret(s). Values are encrypted — use 'mimi secret run' to inject.", entries.len());
         }
     } else {
         // Delegate to vault user
@@ -188,6 +186,33 @@ pub fn list() {
         print!("{}", String::from_utf8_lossy(&output.stdout));
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
+}
+
+/// Scan the vault secrets dir, returning sorted `(name, created_at)` pairs.
+/// `created_at` is the file's mtime formatted as `YYYY-MM-DD HH:MM`, or an
+/// empty string if the mtime can't be read. Only callable as the vault user.
+fn scan_secrets() -> Vec<(String, String)> {
+    let dir = vault_secrets_dir();
+    let mut entries: Vec<(String, String)> = fs::read_dir(&dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            let created_at = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|d| chrono::DateTime::from_timestamp(d.as_secs() as i64, 0))
+                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+                .unwrap_or_default();
+            (name, created_at)
+        })
+        .collect();
+    entries.sort();
+    entries
 }
 
 /// Delete a secret — delegates to vault user
@@ -270,38 +295,23 @@ pub fn run(name: &str, env_var: &str, cmd_args: &[String]) {
 /// List secret names as JSON (for dashboard API) — delegates to vault user
 pub fn list_json() -> Vec<(String, String)> {
     if is_vault_user() {
-        // Running as vault user — list directly
-        let dir = vault_secrets_dir();
-        let mut secrets = Vec::new();
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file() {
-                    let name = path.file_name().unwrap().to_string_lossy().to_string();
-                    let created_at = fs::metadata(&path)
-                        .and_then(|m| m.modified())
-                        .map(|t| {
-                            let secs = t.duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
-                            chrono::DateTime::from_timestamp(secs as i64, 0)
-                                .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
-                                .unwrap_or_default()
-                        })
-                        .unwrap_or_default();
-                    secrets.push((name, created_at));
-                }
-            }
-        }
-        secrets.sort();
-        secrets
-    } else {
-        // Delegate: run `mimi secret list` as vault user, parse output
-        let output = sudo_vault(&["list"]);
-        let text = String::from_utf8_lossy(&output.stdout);
-        text.lines()
-            .filter(|l| l.starts_with("  "))
-            .map(|l| (l.trim().to_string(), String::new()))
-            .collect()
+        return scan_secrets();
     }
+    // Delegate: run `mimi secret list` as vault user, parse output. Each
+    // listed line is `  NAME\tCREATED_AT`; older binaries emit just `  NAME`
+    // so fall back to an empty timestamp when the tab is missing.
+    let output = sudo_vault(&["list"]);
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .filter(|l| l.starts_with("  "))
+        .map(|l| {
+            let body = l.trim_start();
+            match body.split_once('\t') {
+                Some((name, created_at)) => (name.trim().to_string(), created_at.trim().to_string()),
+                None => (body.trim().to_string(), String::new()),
+            }
+        })
+        .collect()
 }
 
 /// One-time setup: create the vault user, directories, and sudoers rule
