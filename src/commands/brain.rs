@@ -92,6 +92,29 @@ pub fn delete(id: i64) {
     }
 }
 
+pub fn update(id: i64, name: Option<&str>, properties: Option<&str>) {
+    ensure_brain();
+    let conn = db::open();
+    match db::update_entity(&conn, id, name, properties) {
+        Ok(entity) => {
+            println!(
+                "Updated entity #{}: {} ({})",
+                entity.id, entity.name, entity.r#type
+            );
+            if !entity.properties.is_null()
+                && !(entity.properties.is_object()
+                    && entity.properties.as_object().unwrap().is_empty())
+            {
+                println!("  properties: {}", entity.properties);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
 pub fn link(source: i64, rel: &str, target: i64) {
     ensure_brain();
     let conn = db::open();

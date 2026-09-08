@@ -31,7 +31,10 @@ pub async fn serve(port: u16) {
         .route("/api/brain/stats", get(api_brain_stats))
         .route("/api/brain/entities", get(api_brain_entities))
         .route("/api/brain/entities/add", post(api_brain_add_entity))
-        .route("/api/brain/entities/{id}", delete(api_brain_delete_entity))
+        .route(
+            "/api/brain/entities/{id}",
+            delete(api_brain_delete_entity).patch(api_brain_update_entity),
+        )
         .route("/api/brain/relationships/add", post(api_brain_add_relationship))
         .route("/api/brain/search", get(api_brain_search))
         .route("/api/brain/query", post(api_brain_query))
@@ -222,6 +225,31 @@ async fn api_brain_delete_entity(
     brain::delete_entity(&db, id)
         .map_err(|e| (StatusCode::NOT_FOUND, e))?;
     Ok(Json(serde_json::json!({ "ok": true, "deleted": id })))
+}
+
+#[derive(Deserialize)]
+struct UpdateEntityBody {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    properties: Option<String>,
+}
+
+async fn api_brain_update_entity(
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Json(body): Json<UpdateEntityBody>,
+) -> Result<Json<brain::Entity>, (StatusCode, String)> {
+    let db = brain::open();
+    let entity = brain::update_entity(&db, id, body.name.as_deref(), body.properties.as_deref())
+        .map_err(|e| {
+            let code = if e.contains("not found") {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            (code, e)
+        })?;
+    Ok(Json(entity))
 }
 
 #[derive(Deserialize)]

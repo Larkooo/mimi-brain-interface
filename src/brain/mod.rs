@@ -85,6 +85,56 @@ pub fn delete_entity(db: &Connection, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// Update an entity's name and/or properties JSON. At least one of `name` or
+/// `properties` must be `Some`; passing both `None` returns an error. The
+/// `updated_at` timestamp is refreshed by the schema trigger.
+pub fn update_entity(
+    db: &Connection,
+    id: i64,
+    name: Option<&str>,
+    properties: Option<&str>,
+) -> Result<Entity, String> {
+    if name.is_none() && properties.is_none() {
+        return Err("nothing to update — pass --name and/or --properties".into());
+    }
+
+    if let Some(p) = properties {
+        let _: serde_json::Value =
+            serde_json::from_str(p).map_err(|e| format!("invalid JSON for properties: {e}"))?;
+    }
+
+    let mut sets: Vec<&'static str> = Vec::new();
+    let mut values: Vec<rusqlite::types::Value> = Vec::new();
+    if let Some(n) = name {
+        sets.push("name = ?");
+        values.push(rusqlite::types::Value::Text(n.to_string()));
+    }
+    if let Some(p) = properties {
+        sets.push("properties = ?");
+        values.push(rusqlite::types::Value::Text(p.to_string()));
+    }
+    let sql = format!("UPDATE entities SET {} WHERE id = ?", sets.join(", "));
+    values.push(rusqlite::types::Value::Integer(id));
+
+    let params_iter: Vec<&dyn rusqlite::ToSql> =
+        values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let changes = db
+        .execute(&sql, params_iter.as_slice())
+        .map_err(|e| format!("failed to update entity: {e}"))?;
+    if changes == 0 {
+        return Err(format!("entity #{} not found", id));
+    }
+
+    let mut stmt = db
+        .prepare(
+            "SELECT id, type, name, properties, created_at, updated_at \
+             FROM entities WHERE id = ?1",
+        )
+        .map_err(|e| format!("failed to prepare select after update: {e}"))?;
+    stmt.query_row(params![id], row_to_entity)
+        .map_err(|e| format!("failed to read updated entity: {e}"))
+}
+
 pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> Result<i64, String> {
     db.execute(
         "INSERT INTO relationships (source_id, target_id, type) VALUES (?1, ?2, ?3)",
