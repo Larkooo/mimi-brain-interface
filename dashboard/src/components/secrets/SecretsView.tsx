@@ -11,6 +11,9 @@ export function SecretsView() {
   const [name, setName] = useState('')
   const [value, setValue] = useState('')
   const [showValue, setShowValue] = useState(false)
+  const [toast, setToast] = useState<string | null>(null)
+
+  const flash = (m: string) => { setToast(m); setTimeout(() => setToast(null), 2500) }
 
   const refresh = useCallback(async () => {
     try { setSecrets(await getSecrets()) } catch {}
@@ -20,15 +23,20 @@ export function SecretsView() {
 
   const handleCreate = async () => {
     if (!name.trim() || !value.trim()) return
-    await setSecret(name.trim(), value)
-    setName(''); setValue(''); setShowValue(false)
-    setAdding(false)
-    refresh()
+    try {
+      await setSecret(name.trim(), value)
+      setName(''); setValue(''); setShowValue(false)
+      setAdding(false)
+      refresh()
+    } catch (e) { flash(`save failed: ${String(e)}`) }
   }
 
   const handleDelete = async (secretName: string) => {
-    await deleteSecret(secretName)
-    refresh()
+    if (!window.confirm(`Delete secret "${secretName}"? The encrypted value cannot be recovered.`)) return
+    try {
+      await deleteSecret(secretName)
+      refresh()
+    } catch (e) { flash(`delete failed: ${String(e)}`) }
   }
 
   return (
@@ -37,15 +45,18 @@ export function SecretsView() {
         <div className="text-[12px] text-muted-foreground">
           {secrets.length} {secrets.length === 1 ? 'secret' : 'secrets'} in keystore
         </div>
-        <Button
-          size="sm"
-          variant="outline"
-          onClick={() => setAdding(!adding)}
-          className="h-8 px-3 text-[12px]"
-        >
-          <Plus size={13} className="mr-1.5" />
-          New secret
-        </Button>
+        <div className="flex items-center gap-3">
+          {toast && <div className="text-[11px] text-muted-foreground">{toast}</div>}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setAdding(!adding)}
+            className="h-8 px-3 text-[12px]"
+          >
+            <Plus size={13} className="mr-1.5" />
+            New secret
+          </Button>
+        </div>
       </div>
 
       <div className="surface px-4 py-3 mb-5 flex items-start gap-3">
