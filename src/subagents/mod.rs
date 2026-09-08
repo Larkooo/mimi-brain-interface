@@ -27,7 +27,7 @@
 
 use std::ffi::CString;
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -663,17 +663,63 @@ pub fn rm(id: &str) -> Result<(), String> {
 pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
     let dir = agent_dir(id);
     let path = stream_path(&dir);
-    let contents = fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(limit);
-    let mut out = Vec::new();
-    for line in &lines[start..] {
-        if line.trim().is_empty() { continue; }
+    let lines = tail_lines(&path, limit).map_err(|e| format!("tail {}: {e}", path.display()))?;
+    let mut out = Vec::with_capacity(lines.len());
+    for line in &lines {
         if let Ok(v) = serde_json::from_str::<Value>(line) {
             out.push(v);
         }
     }
     Ok(out)
+}
+
+/// Return the last `limit` non-empty lines of `path` in chronological
+/// order (oldest first). Reads backwards from EOF in 64 KiB chunks, so
+/// the work is bounded by ~`limit` lines worth of bytes rather than the
+/// whole file. A missing file is treated as empty.
+///
+/// Why: `stream.jsonl` grows for the lifetime of a subagent (the full
+/// `claude -p --include-partial-messages` stream). The dashboard polls
+/// `last_event` for every agent every 5s, and the SSE backlog re-tails
+/// on every reconnect — a naive `read_to_string` would re-scan the
+/// entire file each time.
+fn tail_lines(path: &Path, limit: usize) -> std::io::Result<Vec<String>> {
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut f = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut pos = f.seek(SeekFrom::End(0))?;
+    if pos == 0 {
+        return Ok(Vec::new());
+    }
+    const CHUNK: u64 = 64 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    while pos > 0 {
+        let read_size = pos.min(CHUNK);
+        let new_pos = pos - read_size;
+        f.seek(SeekFrom::Start(new_pos))?;
+        let mut chunk = vec![0u8; read_size as usize];
+        f.read_exact(&mut chunk)?;
+        chunk.extend_from_slice(&buf);
+        buf = chunk;
+        pos = new_pos;
+        // Each `\n` in buf marks the end of a complete line. We need at
+        // least `limit + 1` newlines to guarantee `limit` complete lines —
+        // the +1 buys headroom for a fragmentary line at the front of buf
+        // (which we discard below).
+        let newlines = buf.iter().filter(|&&b| b == b'\n').count();
+        if newlines > limit {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let all: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let start = all.len().saturating_sub(limit);
+    Ok(all[start..].iter().map(|s| s.to_string()).collect())
 }
 
 // ---------- CLI surface (called from main.rs) ----------
@@ -871,4 +917,102 @@ fn render_event_preview(v: &Value) -> String {
 fn truncate(s: &str, n: usize) -> String {
     if s.chars().count() <= n { s.to_string() }
     else { format!("{}…", s.chars().take(n).collect::<String>()) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn write_tmp(contents: &[u8]) -> tempfile::NamedTempFile {
+        let mut f = tempfile::NamedTempFile::new().expect("tmp");
+        f.write_all(contents).expect("write");
+        f.flush().expect("flush");
+        f
+    }
+
+    #[test]
+    fn tail_lines_small_file() {
+        let f = write_tmp(b"a\nb\nc\n");
+        let lines = tail_lines(f.path(), 2).unwrap();
+        assert_eq!(lines, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn tail_lines_limit_exceeds_file() {
+        let f = write_tmp(b"a\nb\nc\n");
+        let lines = tail_lines(f.path(), 10).unwrap();
+        assert_eq!(lines, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn tail_lines_zero_limit() {
+        let f = write_tmp(b"a\nb\nc\n");
+        let lines = tail_lines(f.path(), 0).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tail_lines_empty_file() {
+        let f = write_tmp(b"");
+        let lines = tail_lines(f.path(), 5).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tail_lines_missing_file() {
+        let lines = tail_lines(Path::new("/nonexistent/mimi-tail-test.jsonl"), 5).unwrap();
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn tail_lines_no_trailing_newline() {
+        let f = write_tmp(b"a\nb\nc");
+        let lines = tail_lines(f.path(), 2).unwrap();
+        assert_eq!(lines, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn tail_lines_skips_empty_lines() {
+        let f = write_tmp(b"a\n\n\nb\nc\n");
+        let lines = tail_lines(f.path(), 2).unwrap();
+        assert_eq!(lines, vec!["b".to_string(), "c".to_string()]);
+    }
+
+    /// Smoke test: file larger than the 64 KiB chunk size, last `limit`
+    /// lines are returned and we didn't read past what we needed.
+    #[test]
+    fn tail_lines_large_file_multiple_chunks() {
+        // Build ~200 KiB of input: 1000 lines of ~200 bytes each.
+        let mut content = Vec::with_capacity(200 * 1024);
+        for i in 0..1000 {
+            let line = format!("line-{i:04}-{}\n", "x".repeat(180));
+            content.extend_from_slice(line.as_bytes());
+        }
+        let f = write_tmp(&content);
+        let lines = tail_lines(f.path(), 5).unwrap();
+        assert_eq!(lines.len(), 5);
+        assert!(lines[0].starts_with("line-0995-"));
+        assert!(lines[4].starts_with("line-0999-"));
+    }
+
+    /// Chunk boundary lands exactly on a newline — boundary line should
+    /// still be intact in the output.
+    #[test]
+    fn tail_lines_boundary_alignment() {
+        // Construct content where line breaks fall exactly at 64 KiB.
+        // 64 lines × 1024 bytes = 65536 bytes, plus 100 short tail lines.
+        let mut content = Vec::new();
+        for _ in 0..64 {
+            let mut line = vec![b'A'; 1023];
+            line.push(b'\n');
+            content.extend_from_slice(&line);
+        }
+        for i in 0..100 {
+            let s = format!("t{i}\n");
+            content.extend_from_slice(s.as_bytes());
+        }
+        let f = write_tmp(&content);
+        let lines = tail_lines(f.path(), 3).unwrap();
+        assert_eq!(lines, vec!["t97".to_string(), "t98".to_string(), "t99".to_string()]);
+    }
 }
