@@ -1,3 +1,6 @@
+use std::fs::{File, OpenOptions};
+use std::io::Write as _;
+use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -247,6 +250,8 @@ static BOT_USER_ID: AtomicU64 = AtomicU64::new(0);
 /// Main entrypoint — blocks until killed.
 pub async fn start() -> Result<(), String> {
     let token = load_token()?;
+    // Held for the lifetime of the process — see acquire_instance_lock().
+    let _lock = acquire_instance_lock()?;
     let session_id = ensure_session_id()?;
     write_pidfile()?;
 
@@ -413,6 +418,53 @@ fn load_access() -> Access {
 
 fn pidfile() -> PathBuf {
     channel_dir().join("pid")
+}
+
+fn lockfile() -> PathBuf {
+    channel_dir().join("bridge.lock")
+}
+
+struct InstanceLock {
+    _file: File,
+}
+
+/// Take an exclusive `flock` on `~/.mimi/channels/discord/bridge.lock` so a
+/// second bridge can't start behind the first one's back.
+///
+/// Unlike Telegram's `getUpdates`, the Discord gateway happily accepts two
+/// concurrent connections on the same bot token, so a duplicate bridge fails
+/// silently-but-destructively: both processes receive every MESSAGE_CREATE
+/// and dispatch it to their own claude subprocess (Mimi answers twice), the
+/// second one overwrites the pidfile (so `mimi channel stop discord` only
+/// kills one), `spawn_claude_with_retry` rotates `session_id` out from under
+/// the first process, and only one of the two wins the bind for the voice
+/// control server.
+///
+/// The kernel drops the lock when the process exits, so a crashed bridge
+/// leaves nothing to clean up. Mirrors `telegram::acquire_instance_lock`.
+fn acquire_instance_lock() -> Result<InstanceLock, String> {
+    let dir = channel_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = lockfile();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if rc != 0 {
+        return Err(format!(
+            "discord bridge lock is already held at {}; another bridge instance is running ({})",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    file.set_len(0)
+        .map_err(|e| format!("truncate {}: {e}", path.display()))?;
+    writeln!(file, "{}", std::process::id())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(InstanceLock { _file: file })
 }
 
 fn restart_marker_path() -> PathBuf {
