@@ -3,9 +3,27 @@ use std::fs;
 
 /// Known channel plugins and their Claude Code plugin identifiers
 const CHANNEL_PLUGINS: &[(&str, &str)] = &[
-    ("discord", "discord@claude-plugins-official"),
     ("imessage", "imessage@claude-plugins-official"),
 ];
+
+/// Channels served by one of Mimi's own in-process bridges (`src/channels/`)
+/// rather than a Claude Code plugin. Their whole config — access.json,
+/// session_id, pidfile, .env — lives under ~/.mimi/channels/<type>/ so that
+/// `mimi backup` captures it and `MIMI_HOME` overrides apply.
+const NATIVE_CHANNELS: &[&str] = &["telegram", "discord"];
+
+fn is_native_channel(channel_type: &str) -> bool {
+    NATIVE_CHANNELS.contains(&channel_type)
+}
+
+/// Where Claude-Code-plugin-backed channels keep their config.
+fn legacy_plugin_dir(channel_type: &str) -> std::path::PathBuf {
+    dirs::home_dir()
+        .expect("no home dir")
+        .join(".claude")
+        .join("channels")
+        .join(channel_type)
+}
 
 fn plugin_for_channel(channel_type: &str) -> Option<&'static str> {
     CHANNEL_PLUGINS
@@ -83,9 +101,9 @@ pub fn add(channel_type: &str) -> Result<(), String> {
         }),
         "discord" => serde_json::json!({
             "type": "discord",
-            "plugin": plugin.unwrap_or(""),
+            "plugin": "mimi-native",
             "enabled": true,
-            "notes": "1. Create a Discord app at https://discord.com/developers\n2. Enable Message Content Intent under Bot settings\n3. Generate and copy the bot token\n4. Run: mimi channel configure discord <bot_token>\n5. Invite bot to server with OAuth2 URL Generator (bot scope)\n6. Relaunch mimi to connect"
+            "notes": "1. Create a Discord app at https://discord.com/developers\n2. Enable Message Content Intent under Bot settings\n3. Generate and copy the bot token\n4. Run: mimi channel configure discord <bot_token>\n5. Token is stored in ~/.mimi/channels/discord/.env\n6. Invite bot to server with OAuth2 URL Generator (bot scope)\n7. Start with: mimi channel start discord"
         }),
         "imessage" => serde_json::json!({
             "type": "imessage",
@@ -105,19 +123,20 @@ pub fn add(channel_type: &str) -> Result<(), String> {
     println!("\nChannel added: {}", channel_type);
     println!("Config: {}", path.display());
 
-    if plugin.is_some() {
+    // Native bridges have no plugin to install, but their setup notes are the
+    // only place that says where the bot token goes — always print them.
+    if let Some(notes) = config.get("notes").and_then(|v| v.as_str()) {
         println!("\nNext steps:");
-        if let Some(notes) = config.get("notes").and_then(|v| v.as_str()) {
-            for line in notes.lines() {
-                println!("  {}", line);
-            }
+        for line in notes.lines() {
+            println!("  {}", line);
         }
     }
     Ok(())
 }
 
-/// Configure a channel with a bot token
-/// Telegram is a native Mimi bridge and stores config under ~/.mimi/channels/telegram/.
+/// Configure a channel with a bot token.
+/// Telegram and Discord are native Mimi bridges and keep their config under
+/// ~/.mimi/channels/<type>/ so `mimi backup` captures it.
 /// Claude-plugin-backed channels keep their plugin config under ~/.claude/channels/<type>/.
 pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
     let env_var = match channel_type {
@@ -128,14 +147,10 @@ pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
         }
     };
 
-    let channel_dir = if channel_type == "telegram" {
+    let channel_dir = if is_native_channel(channel_type) {
         paths::channels_dir().join(channel_type)
     } else {
-        dirs::home_dir()
-            .expect("no home dir")
-            .join(".claude")
-            .join("channels")
-            .join(channel_type)
+        legacy_plugin_dir(channel_type)
     };
     fs::create_dir_all(&channel_dir)
         .map_err(|e| format!("Failed to create channel directory {}: {}", channel_dir.display(), e))?;
@@ -143,6 +158,24 @@ pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
     let env_path = channel_dir.join(".env");
     fs::write(&env_path, format!("{}={}\n", env_var, token))
         .map_err(|e| format!("Failed to write bot token to {}: {}", env_path.display(), e))?;
+
+    // A native bridge that used to be plugin-backed may still have a copy of
+    // the token sitting in ~/.claude. That copy is outside what `mimi backup`
+    // archives and outside what `mimi channel remove` scrubs, so drop it once
+    // the authoritative one is safely written.
+    if is_native_channel(channel_type) {
+        let legacy_env = legacy_plugin_dir(channel_type).join(".env");
+        if legacy_env.exists() {
+            match fs::remove_file(&legacy_env) {
+                Ok(()) => println!("Removed stale token copy at {}", legacy_env.display()),
+                Err(e) => eprintln!(
+                    "Warning: could not remove stale token copy at {}: {}",
+                    legacy_env.display(),
+                    e
+                ),
+            }
+        }
+    }
 
     // Also mark the channel as configured in our config
     let config_path = paths::channels_dir().join(format!("{}.json", channel_type));

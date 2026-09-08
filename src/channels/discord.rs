@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -293,18 +293,54 @@ pub async fn start() -> Result<(), String> {
 
 // --- Config / state ---
 
-fn load_token() -> Result<String, String> {
-    let path = dirs::home_dir()
-        .ok_or("no home dir")?
-        .join(".claude/channels/discord/.env");
-    let contents = std::fs::read_to_string(&path)
-        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+/// Where the plugin-era Discord config used to live. Kept as a read-only
+/// fallback so installs that predate the move keep booting; `mimi channel
+/// configure discord` relocates the token into ~/.mimi on the next run.
+fn legacy_env_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".claude/channels/discord/.env"))
+}
+
+fn token_from_env_file(path: &Path) -> Option<String> {
+    let contents = std::fs::read_to_string(path).ok()?;
     for line in contents.lines() {
         if let Some(v) = line.strip_prefix("DISCORD_BOT_TOKEN=") {
-            return Ok(v.trim().to_string());
+            let token = v.trim().trim_matches('"');
+            if !token.is_empty() {
+                return Some(token.to_string());
+            }
         }
     }
-    Err(format!("DISCORD_BOT_TOKEN not found in {}", path.display()))
+    None
+}
+
+fn load_token() -> Result<String, String> {
+    if let Ok(token) = std::env::var("DISCORD_BOT_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+
+    let path = channel_dir().join(".env");
+    if let Some(token) = token_from_env_file(&path) {
+        return Ok(token);
+    }
+
+    if let Some(legacy) = legacy_env_path() {
+        if let Some(token) = token_from_env_file(&legacy) {
+            eprintln!(
+                "discord: token read from legacy {} — run `mimi channel configure discord <token>` to move it under {} so `mimi backup` captures it",
+                legacy.display(),
+                channel_dir().display()
+            );
+            return Ok(token);
+        }
+    }
+
+    Err(format!(
+        "DISCORD_BOT_TOKEN not configured in env or {}",
+        path.display()
+    ))
 }
 
 fn channel_dir() -> PathBuf {
