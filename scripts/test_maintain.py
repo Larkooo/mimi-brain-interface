@@ -149,6 +149,20 @@ class PolicyTests(unittest.TestCase):
         candidate["labels"] = [{"name": "mimi:automerge"}]
         self.assertIsNone(maintain.eligibility(candidate, self.config, {}))
 
+    def test_only_executed_test_frameworks_count_as_regression_evidence(self):
+        for changes in [
+            '+    if (rp && !/^\\d+$/.test(rp)) {',
+            '+test("regression", () => {});',
+            '+def test_regression():',
+            '+// #[test]',
+            '+let example = "#[test]";',
+        ]:
+            with self.subTest(changes=changes):
+                self.assertFalse(maintain.has_added_regression_test(changes))
+        for attribute in ['#[test]', '#[tokio::test]', '#[tokio::test(flavor = "multi_thread")]']:
+            with self.subTest(attribute=attribute):
+                self.assertTrue(maintain.has_added_regression_test('+    ' + attribute + '\n+fn regression() {}'))
+
     def test_failed_pending_and_skipped_checks_block_release(self):
         for check in [
             {"status": "IN_PROGRESS", "conclusion": None},
@@ -215,6 +229,19 @@ class ReleaseTests(unittest.TestCase):
         self.assertLess(self.controller.actions.index("watch-candidate"), self.controller.actions.index("github-merge"))
         self.assertIn("probation", self.controller.state)
         self.assertNotIn("pending", self.controller.state)
+
+    def test_regex_validation_cannot_unlock_a_release_without_regression_tests(self):
+        original_git = self.controller.git
+        def git(*arguments, **kwargs):
+            if "--unified=0" in arguments:
+                return '+    if (rp && !/^\\d+$/.test(rp)) {'
+            return original_git(*arguments, **kwargs)
+        with patch.object(self.controller, "git", side_effect=git), patch.object(maintain, "run") as commands:
+            self.controller.release(eligible_pr())
+        commands.assert_not_called()
+        self.assertNotIn("install-candidate", self.controller.actions)
+        self.assertNotIn("github-merge", self.controller.actions)
+        self.assertIn("regression tests", self.controller.state["quarantined"]["candidate-head"]["reason"])
 
     def test_reviewer_failure_keeps_previous_brief_and_enforces_cooldown(self):
         brief = {"brief": "Previous evidence-backed plan"}

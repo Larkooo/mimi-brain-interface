@@ -31,6 +31,10 @@ agent or nightly PR quota. Existing trusted PRs enter evaluation without an owne
 label or approval. Mimi requests missing CI, reviews the diff independently, then
 tests and releases qualifying repairs. Changes without effective regression tests
 remain held; the controller does not invent tests or repair rejected source yet.
+The regression-test prefilter currently accepts added Rust test attributes only:
+candidate validation executes `cargo test`, while the frontend is built without a
+test runner. JavaScript regex `.test()` calls are not regression tests. Independent
+review still checks whether an added test exercises the defect.
 
 ## Automatic release policy
 

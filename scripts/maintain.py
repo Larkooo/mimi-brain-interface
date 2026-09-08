@@ -148,7 +148,13 @@ def path_block(files, config):
 
 
 def has_added_regression_test(changes):
-    return bool(re.search(r"^\+.*(#\[(tokio::)?test\]|\b(test|it)\(|def test_)", changes, re.MULTILINE))
+    # The candidate validation runs cargo test, but has no frontend/Python test
+    # runner. Regex .test(...) calls are application code, not test declarations.
+    # This is only a prefilter; the independent review must assess test coverage.
+    return bool(re.search(
+        r"^\+\s*#\[(?:tokio::)?test(?:\([^\]\n]*\))?\]\s*(?://[^\n]*)?$",
+        changes, re.MULTILINE,
+    ))
 
 
 def update_observations(previous, findings, now, unavailable=()):
