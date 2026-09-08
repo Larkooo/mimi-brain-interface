@@ -390,9 +390,14 @@ async fn api_config_set(
 async fn api_session_launch() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let config = load_config();
     let session = config.get("session_name").and_then(|v| v.as_str()).unwrap_or("mimi");
-    crate::claude::launch_tmux(session)
+    let outcome = crate::claude::launch_tmux(session)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
-    Ok(Json(serde_json::json!({ "ok": true, "session": session })))
+    let already_running = matches!(outcome, crate::claude::LaunchOutcome::AlreadyRunning);
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "session": session,
+        "already_running": already_running,
+    })))
 }
 
 async fn api_session_stop() -> Json<serde_json::Value> {

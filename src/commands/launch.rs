@@ -13,9 +13,14 @@ pub fn run() {
         .unwrap_or("mimi");
 
     match crate::claude::launch_tmux(session_name) {
-        Ok(()) => {
+        Ok(crate::claude::LaunchOutcome::Created) => {
             println!("Mimi is alive in tmux session '{session_name}'");
             println!("Attach with: tmux attach -t {session_name}");
+        }
+        Ok(crate::claude::LaunchOutcome::AlreadyRunning) => {
+            println!("Mimi is already running in tmux session '{session_name}'");
+            println!("Attach with: tmux attach -t {session_name}");
+            println!("Stop with:   tmux kill-session -t {session_name}");
         }
         Err(e) => {
             eprintln!("Failed to launch: {e}");
