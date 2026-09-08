@@ -21,6 +21,7 @@ export function TasksView() {
   const [tree, setTree] = useState<TaskTreeNode[]>([])
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [filter, setFilter] = useState<Status | 'all'>('all')
   const [creating, setCreating] = useState(false)
 
@@ -35,13 +36,26 @@ export function TasksView() {
   }, [refreshTree])
 
   useEffect(() => {
-    if (selectedId == null) { setDetail(null); return }
+    if (selectedId == null) { setDetail(null); setDetailError(null); return }
+    // Clear stale detail from the previously-selected task so the panel
+    // doesn't briefly render the wrong task while the new one is loading.
+    setDetail(null)
+    setDetailError(null)
     let cancelled = false
+    let loadedOnce = false
     const load = async () => {
       try {
         const d = await getTask(selectedId)
-        if (!cancelled) setDetail(d)
-      } catch { if (!cancelled) setDetail(null) }
+        if (cancelled) return
+        setDetail(d)
+        setDetailError(null)
+        loadedOnce = true
+      } catch (e) {
+        if (cancelled) return
+        // Only surface the error on the initial load. Once we have data,
+        // a transient polling failure shouldn't wipe the panel.
+        if (!loadedOnce) setDetailError(e instanceof Error ? e.message : String(e))
+      }
     }
     load()
     const t = setInterval(load, 3000)
@@ -140,6 +154,14 @@ export function TasksView() {
                 await refreshTree()
               }}
             />
+          ) : detailError ? (
+            <div className="px-6 py-10 text-[12px]" style={{ color: 'var(--danger)' }}>
+              # failed to load task #{selectedId}: {detailError}
+            </div>
+          ) : selectedId != null ? (
+            <div className="px-6 py-10 text-[12px] text-muted-foreground">
+              # loading task #{selectedId}…
+            </div>
           ) : (
             <div className="px-6 py-10 text-[12px] text-muted-foreground">
               # select a task on the left to see its updates and children.
