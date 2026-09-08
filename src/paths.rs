@@ -57,6 +57,10 @@ pub fn subagents_dir() -> PathBuf {
     home().join("subagents")
 }
 
+pub fn cron_logs_dir() -> PathBuf {
+    home().join("cron_logs")
+}
+
 pub fn ensure_dirs() {
     for dir in [
         home(),
@@ -66,6 +70,7 @@ pub fn ensure_dirs() {
         backups_dir(),
         tasks_dir(),
         subagents_dir(),
+        cron_logs_dir(),
     ] {
         fs::create_dir_all(&dir).ok();
     }

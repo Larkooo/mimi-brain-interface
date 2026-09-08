@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback } from 'react'
 import type { CronJob } from '../../hooks/useApi'
-import { getCrons, createCron, deleteCron, toggleCron } from '../../hooks/useApi'
+import { getCrons, createCron, deleteCron, toggleCron, runCron } from '../../hooks/useApi'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Plus, Trash2, Power, Clock } from 'lucide-react'
+import { Plus, Trash2, Power, Clock, Play } from 'lucide-react'
 
 const SCHEDULE_PRESETS = [
   { label: 'Every 5 min', value: '*/5 * * * *' },
@@ -15,6 +15,24 @@ const SCHEDULE_PRESETS = [
   { label: 'Custom', value: '' },
 ]
 
+function lastRunLabel(cron: CronJob): string {
+  if (!cron.last_run) return 'never run'
+  const secs = Math.max(0, (Date.now() - new Date(cron.last_run).getTime()) / 1000)
+  const ago =
+    secs < 60 ? `${Math.floor(secs)}s` :
+    secs < 3600 ? `${Math.floor(secs / 60)}m` :
+    secs < 86400 ? `${Math.floor(secs / 3600)}h` :
+    `${Math.floor(secs / 86400)}d`
+  return `${cron.last_status ?? 'ran'} · ${ago} ago`
+}
+
+function statusTone(status?: string): string {
+  if (!status) return 'text-muted-foreground/50'
+  if (status === 'running') return 'text-muted-foreground'
+  if (status === 'ok') return 'text-success'
+  return 'text-danger'
+}
+
 export function CronsView() {
   const [crons, setCrons] = useState<CronJob[]>([])
   const [adding, setAdding] = useState(false)
@@ -23,19 +41,37 @@ export function CronsView() {
   const [customSchedule, setCustomSchedule] = useState('')
   const [prompt, setPrompt] = useState('')
   const [description, setDescription] = useState('')
+  const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try { setCrons(await getCrons()) } catch {}
   }, [])
 
-  useEffect(() => { refresh() }, [refresh])
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 15000)
+    return () => clearInterval(t)
+  }, [refresh])
 
   const handleCreate = async () => {
     const sched = schedule || customSchedule
     if (!name.trim() || !sched.trim() || !prompt.trim()) return
-    await createCron(name, sched, prompt, description)
+    try {
+      await createCron(name, sched, prompt, description)
+    } catch (e) {
+      // The backend rejects unparseable cron expressions — show why rather
+      // than saving a schedule that could never fire.
+      setError(e instanceof Error ? e.message : 'Failed to create schedule')
+      return
+    }
     setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
+    setError('')
     setAdding(false)
+    refresh()
+  }
+
+  const handleRun = async (id: string) => {
+    try { await runCron(id) } catch {}
     refresh()
   }
 
@@ -123,6 +159,10 @@ export function CronsView() {
             className="bg-muted/40 border-border"
           />
 
+          {error && (
+            <div className="text-[11px] text-danger">{error}</div>
+          )}
+
           <div className="flex gap-2">
             <Button size="sm" onClick={handleCreate}
               disabled={!name.trim() || !(schedule || customSchedule).trim() || !prompt.trim()}>
@@ -154,9 +194,19 @@ export function CronsView() {
                   <div className="min-w-0 flex items-baseline gap-2 flex-wrap">
                     <span className="text-[13px] font-medium tracking-tight">{cron.name}</span>
                     <span className="text-[10px] text-muted-foreground font-mono">{cron.schedule}</span>
+                    <span className={`text-[10px] ${statusTone(cron.last_status)}`}>
+                      {lastRunLabel(cron)}
+                    </span>
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">
+                  <button
+                    className="p-1.5 rounded-md text-muted-foreground/60 hover:text-foreground hover:bg-accent transition-colors"
+                    onClick={() => handleRun(cron.id)}
+                    title="Run now"
+                  >
+                    <Play size={13} />
+                  </button>
                   <button
                     className={`p-1.5 rounded-md transition-colors ${cron.enabled ? 'text-success hover:bg-accent' : 'text-muted-foreground/60 hover:text-foreground hover:bg-accent'}`}
                     onClick={() => handleToggle(cron.id)}
