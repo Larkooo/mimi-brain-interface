@@ -41,6 +41,27 @@ fn sudo_vault(args: &[&str]) -> std::process::Output {
         .expect("failed to run sudo")
 }
 
+/// Run a mimi secret subcommand as the vault user via sudo, feeding `input`
+/// on the child's stdin instead of passing it in argv. Used for `set` so the
+/// plaintext value never lands in `/proc/<pid>/cmdline`.
+fn sudo_vault_stdin(args: &[&str], input: &[u8]) -> std::io::Result<std::process::Output> {
+    use std::io::Write;
+    let mut cmd_args = vec!["-u", VAULT_USER, "--", MIMI_BIN, "secret"];
+    cmd_args.extend(args);
+    let mut child = Command::new("sudo")
+        .args(&cmd_args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .as_mut()
+        .expect("stdin piped")
+        .write_all(input)?;
+    child.wait_with_output()
+}
+
 /// Ensure the vault key exists (only callable as vault user)
 fn ensure_key() -> std::path::PathBuf {
     let key_path = vault_key_path();
@@ -60,14 +81,69 @@ fn ensure_key() -> std::path::PathBuf {
     key_path
 }
 
-/// Set a secret — delegates to vault user
+/// Set a secret — delegates to vault user.
+///
+/// The value is handed to the vault user on stdin, never as a command-line
+/// argument: argv is world-readable through `/proc/<pid>/cmdline`, so a
+/// `sudo ... mimi secret set <name> <value>` hop would expose the plaintext
+/// to anything that happens to run `ps` while the write is in flight —
+/// including Mimi's own Bash tool calls, which run as the same unprivileged
+/// user the vault is meant to keep secrets away from.
 pub fn set(name: &str, value: &str) {
     if is_vault_user() {
         set_direct(name, value);
-    } else {
-        let output = sudo_vault(&["set", name, value]);
-        print!("{}", String::from_utf8_lossy(&output.stdout));
-        eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        return;
+    }
+    // Trailing newline is the wire framing; the vault side strips exactly one.
+    let mut payload = value.as_bytes().to_vec();
+    payload.push(b'\n');
+    match sudo_vault_stdin(&["set", name], &payload) {
+        Ok(output) => {
+            print!("{}", String::from_utf8_lossy(&output.stdout));
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+        }
+        Err(e) => eprintln!("Failed to run sudo: {}", e),
+    }
+}
+
+/// CLI entry point for `mimi secret set <name> [value]`. With no `value`
+/// argument the secret is read from stdin, which is both the safe way to
+/// script it (`printf %s "$tok" | mimi secret set foo`) and the channel the
+/// non-vault `set` above uses to reach the vault user.
+pub fn set_cli(name: &str, value: Option<&str>) {
+    match value {
+        Some(v) => set(name, v),
+        None => {
+            use std::io::Read;
+            if unsafe { libc::isatty(0) } == 1 {
+                eprintln!("Reading secret value from stdin (finish with Ctrl-D)...");
+            }
+            let mut buf = Vec::new();
+            if let Err(e) = std::io::stdin().read_to_end(&mut buf) {
+                eprintln!("Failed to read secret from stdin: {}", e);
+                std::process::exit(1);
+            }
+            // Strip one trailing newline so `echo tok | mimi secret set foo`
+            // stores "tok", not "tok\n".
+            if buf.last() == Some(&b'\n') {
+                buf.pop();
+                if buf.last() == Some(&b'\r') {
+                    buf.pop();
+                }
+            }
+            let value = match String::from_utf8(buf) {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("Secret value must be valid UTF-8.");
+                    std::process::exit(1);
+                }
+            };
+            if value.is_empty() {
+                eprintln!("Refusing to store an empty secret.");
+                std::process::exit(1);
+            }
+            set(name, &value);
+        }
     }
 }
 

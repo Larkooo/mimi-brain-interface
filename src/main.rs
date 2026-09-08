@@ -329,12 +329,13 @@ enum ContextCommands {
 
 #[derive(Subcommand)]
 enum SecretCommands {
-    /// Store an encrypted secret
+    /// Store an encrypted secret. Omit VALUE to read it from stdin —
+    /// preferred, since argv is world-readable via /proc.
     Set {
         /// Secret name
         name: String,
-        /// Secret value
-        value: String,
+        /// Secret value. If omitted, read from stdin.
+        value: Option<String>,
     },
     /// List stored secrets (names only, never values)
     List,
@@ -448,7 +449,9 @@ async fn main() {
         Some(Commands::Audit { apply, review, status }) => commands::audit::run(apply, review, status),
         Some(Commands::Update) => commands::update::run(),
         Some(Commands::Secret { command }) => match command {
-            SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
+            SecretCommands::Set { name, value } => {
+                commands::secret::set_cli(&name, value.as_deref())
+            }
             SecretCommands::List => commands::secret::list(),
             SecretCommands::Delete { name } => commands::secret::delete(&name),
             SecretCommands::Get { name } => commands::secret::get(&name),
