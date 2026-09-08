@@ -237,6 +237,13 @@ function DetailPanel({ id, onChanged, onDeleted }: {
           ended_at: s._ended_at,
           exit_code: s._exit_code,
         })
+        // Server closes the SSE shortly after a terminal status. Close
+        // the EventSource explicitly so the browser doesn't auto-reconnect
+        // into an endpoint that will just close again.
+        if (s._status === 'completed' || s._status === 'failed' || s._status === 'killed') {
+          mounted = false
+          es.close()
+        }
       } catch {}
     })
     es.onerror = () => { /* keep open; browser will reconnect */ }
