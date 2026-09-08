@@ -262,7 +262,14 @@ async fn api_brain_query(
     if !(sql.to_uppercase().starts_with("SELECT") || sql.to_uppercase().starts_with("WITH")) {
         return Err((StatusCode::BAD_REQUEST, "Only SELECT/WITH queries allowed via API".to_string()));
     }
-    let db = brain::open();
+    // The dashboard binds 0.0.0.0, so this endpoint is reachable from the
+    // network. The SELECT/WITH prefix check alone is bypassable —
+    // `WITH cte AS (...) UPDATE/INSERT/DELETE ...` is valid SQLite and
+    // rusqlite's query_map executes the underlying DML when the iterator
+    // steps. Force a read-only connection so the engine itself rejects
+    // any mutation.
+    let db = brain::open_readonly()
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
     let rows = brain::raw_query(&db, sql)
         .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
     Ok(Json(rows))

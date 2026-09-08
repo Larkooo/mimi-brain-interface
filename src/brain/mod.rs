@@ -1,4 +1,4 @@
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OpenFlags, params};
 use serde::{Deserialize, Serialize};
 use crate::paths;
 
@@ -40,6 +40,19 @@ pub fn open() -> Connection {
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;").ok();
     migrate(&db);
     db
+}
+
+/// Open the brain database in read-only mode. Use this for any code path
+/// that exposes ad-hoc SQL to an untrusted caller — SQLite enforces the
+/// read-only flag at the engine level, so it blocks DML even when the
+/// statement is smuggled in via a `WITH cte AS (...) UPDATE/INSERT/DELETE`
+/// CTE prefix (which a naive `SELECT`/`WITH` substring check lets through).
+pub fn open_readonly() -> Result<Connection, String> {
+    Connection::open_with_flags(
+        paths::brain_db(),
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| format!("failed to open brain.db read-only: {e}"))
 }
 
 /// Apply schema migrations that may be missing from older databases.
