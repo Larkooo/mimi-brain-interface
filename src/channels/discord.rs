@@ -929,6 +929,25 @@ async fn handle_reaction_add(client: &reqwest::Client, token: &str, d: &Value) {
         .and_then(|s| s.parse().ok()).unwrap_or(0);
     if reactor_id == bot_id { return; }
 
+    // Access gate — same guild/DM whitelist MESSAGE_CREATE applies. Reactions
+    // are the only other path that writes into the shared context buffer, and
+    // `reactor_name` below is attacker-controlled free text that lands verbatim
+    // in every later turn's `<recent_context>` preamble. Without this, someone
+    // whose *messages* the bridge deliberately refuses to read can still inject
+    // into Mimi's context (and burn a REST call per reaction doing it).
+    let guild_id: Option<u64> = d.get("guild_id").and_then(|x| x.as_str())
+        .and_then(|s| s.parse().ok());
+    if let Some(acc) = ACCESS.get() {
+        match guild_id {
+            Some(gid) if !acc.guild_allowed(gid) => return,
+            None if !acc.dm_allowed(reactor_id) => {
+                eprintln!("discord: dropped reaction from non-whitelisted DM user {reactor_id}");
+                return;
+            }
+            _ => {}
+        }
+    }
+
     // Gateway v10 includes `message_author_id` on MESSAGE_REACTION_ADD so we
     // can filter cheaply without an extra REST roundtrip. Only process
     // reactions to our own messages.
