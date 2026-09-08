@@ -2,6 +2,48 @@ use crate::brain;
 use crate::paths;
 use std::process::Command;
 
+/// systemd user services that make up a running Mimi deployment. Kept in
+/// sync with MANAGED_SERVICES in src/dashboard/mod.rs.
+const MANAGED_SERVICES: &[&str] = &["mimi-telegram", "mimi-discord", "mimi-dashboard"];
+
+struct ServiceStatus {
+    active_state: String,
+    sub_state: String,
+    main_pid: Option<u32>,
+    enabled: bool,
+}
+
+fn systemctl_user(args: &[&str]) -> Option<String> {
+    let out = Command::new("systemctl").arg("--user").args(args).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+fn service_status(name: &str) -> ServiceStatus {
+    let show = systemctl_user(&["show", name, "--no-page"]).unwrap_or_default();
+    let mut s = ServiceStatus {
+        active_state: "unknown".into(),
+        sub_state: "unknown".into(),
+        main_pid: None,
+        enabled: false,
+    };
+    for line in show.lines() {
+        if let Some(v) = line.strip_prefix("ActiveState=") {
+            s.active_state = v.into();
+        } else if let Some(v) = line.strip_prefix("SubState=") {
+            s.sub_state = v.into();
+        } else if let Some(v) = line.strip_prefix("MainPID=") {
+            s.main_pid = v.parse().ok().filter(|p| *p != 0);
+        }
+    }
+    s.enabled = systemctl_user(&["is-enabled", name])
+        .map(|o| o.trim() == "enabled")
+        .unwrap_or(false);
+    s
+}
+
 pub fn run() {
     if !paths::brain_db().exists() {
         eprintln!("Mimi is not set up yet. Run `mimi setup` first.");
@@ -24,18 +66,24 @@ pub fn run() {
 
     println!("=== {} Status ===\n", name);
 
-    // Check tmux session
+    println!("  Services:");
+    for svc in MANAGED_SERVICES {
+        let s = service_status(svc);
+        let state = format!("{} ({})", s.active_state, s.sub_state);
+        let enabled = if s.enabled { "enabled" } else { "disabled" };
+        let pid = s.main_pid.map(|p| format!(" · pid {p}")).unwrap_or_default();
+        println!("    {:<18} {:<22} · {}{}", svc, state, enabled, pid);
+    }
+
+    // tmux interactive session (only used by `mimi` with no subcommand).
     let tmux_running = Command::new("tmux")
         .args(["has-session", "-t", session])
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);
-
-    if tmux_running {
-        println!("  Session:  RUNNING (tmux: {})", session);
-    } else {
-        println!("  Session:  NOT RUNNING");
-    }
+    let tmux_state = if tmux_running { "running" } else { "not running" };
+    println!("    {:<18} {}", format!("tmux: {session}"), tmux_state);
+    println!();
 
     // Claude version
     let version = crate::claude::version();
