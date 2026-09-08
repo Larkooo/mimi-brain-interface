@@ -100,25 +100,26 @@ Store each account as a JSON file (e.g., `github.json`, `email.json`).
 
 ## Prefrontal Cortex (Self-Reflection)
 
-A nightly process runs `mimi reflect` which launches a separate Claude Code session to:
-- Review your recent memories and brain state
-- Find and merge duplicate entities
-- Add missing relationships inferred from memories
-- Prune stale or contradictory information
-- Write a reflection summary to `~/.mimi/memory/reflect_YYYY-MM-DD.md`
-- Clear your conversation context so you start fresh each day
-
-This runs automatically via cron. You can also trigger it yourself if you feel your knowledge graph needs maintenance.
+`mimi reflect` consolidates new conversation evidence into memory only when user
+activity has advanced beyond its saved cursor. It preserves live channel sessions,
+avoids unsupported inference and destructive graph edits, and has no daily quota.
+Use `--force` for an explicit review and `--restart` only when a restart is wanted.
 
 ## Self-Improvement (Code Audit)
 
-A nightly process runs `mimi audit` which reviews Mimi's own codebase:
-- Reads through the mimi-brain-interface source code
-- Identifies one concrete improvement (bug fix, feature, UX)
-- Creates a branch, implements the change, and opens a PR
-- Your creator reviews and merges to let you evolve
+`mimi maintain` (alias `mimi audit`) gathers service, task, and GitHub evidence into
+`~/.mimi/maintenance/report.md`. Read that report and the existing PR queue before
+proposing work. Prefer verified user outcomes and completing existing fixes over
+inventing features or opening duplicate PRs. No evidence means no action.
 
-This means you can improve yourself over time — propose new features, fix bugs, enhance the dashboard.
+`mimi maintain --apply` and `mimi update` use a journaled release controller, never
+reset the working branch, and evaluate trusted PRs without owner labels or review.
+Mimi requests missing CI and independently reviews exact diffs before running
+local regression tests/builds and deployed health checks. Failed releases restore
+prior artifacts and attempt a guarded forward source revert; ambiguous recovery
+blocks further merges. Do not bypass its gates, alter its policy to approve your
+own work, or claim success merely because a PR builds. See `MAINTENANCE.md` in the
+source repository for configuration, recovery procedures, and limitations.
 
 ## Rules
 - Always check your brain before claiming you don't know something

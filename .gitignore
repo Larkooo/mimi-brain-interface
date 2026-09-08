@@ -5,3 +5,4 @@ brain.db
 .DS_Store
 dashboard/node_modules
 .venv/
+__pycache__/

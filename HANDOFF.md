@@ -16,8 +16,9 @@ A Rust binary (`mimi`) that wraps Claude Code. Commands:
 - `mimi channel add/list/remove` — channel management (installs Claude Code plugins)
 - `mimi mcp add/list/remove` — wraps `claude mcp`
 - `mimi plugin` — wraps `claude plugin`
-- `mimi reflect` — prefrontal cortex: stops session, runs reflection agent, relaunches fresh
-- `mimi audit` — reviews own codebase, proposes improvements via PR
+- `mimi reflect` — evidence-gated memory consolidation; preserves live sessions
+- `mimi audit` / `mimi maintain` — observe and prioritize; `--apply` enables policy-gated releases and recovery
+- `mimi update` — uses the maintenance controller; never resets the working branch
 - `mimi backup` — backup `~/.mimi/`
 - `mimi config` — show config
 
@@ -87,9 +88,10 @@ Telegram, Discord, iMessage supported via Claude Code plugins. Adding a channel:
 3. Writes bot token to `~/.claude/channels/<type>/.env`
 4. On launch, enabled channels are passed as `--channels plugin:<plugin-id>` to claude
 
-### Nightly cron jobs (already configured)
-- 3:00 AM: `mimi reflect` — self-reflection cycle
-- 3:30 AM: `mimi audit` — codebase self-improvement
+### Maintenance scheduling
+- Nightly `mimi reflect` skips idle/processed conversations and preserves sessions.
+- Replace the old nightly audit/update jobs with a five-minute standalone maintenance
+  controller. See `MAINTENANCE.md` for installation, safety policy, and recovery.
 
 ### GitHub
 Repo: https://github.com/Larkooo/mimi-brain-interface

@@ -55,10 +55,23 @@ enum Commands {
     /// Backup ~/.mimi/ data
     Backup,
     /// Run a self-reflection cycle (prefrontal cortex)
-    Reflect,
-    /// Audit own codebase and propose improvements via PR
-    Audit,
-    /// Pull latest master, rebuild, and install the new binary/dashboard
+    Reflect {
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        restart: bool,
+    },
+    /// Observe health and existing work; optionally validate and deploy an eligible PR
+    #[command(visible_alias = "maintain")]
+    Audit {
+        #[arg(long, conflicts_with = "status")]
+        apply: bool,
+        #[arg(long, conflicts_with = "status")]
+        review: bool,
+        #[arg(long)]
+        status: bool,
+    },
+    /// Run the supervised release controller with rollback enabled
     Update,
     /// Manage encrypted secrets (isolated vault)
     Secret {
@@ -431,8 +444,8 @@ async fn main() {
         }
         Some(Commands::Config) => commands::config::run(),
         Some(Commands::Backup) => commands::backup::run(),
-        Some(Commands::Reflect) => commands::reflect::run(),
-        Some(Commands::Audit) => commands::audit::run(),
+        Some(Commands::Reflect { force, restart }) => commands::reflect::run(force, restart),
+        Some(Commands::Audit { apply, review, status }) => commands::audit::run(apply, review, status),
         Some(Commands::Update) => commands::update::run(),
         Some(Commands::Secret { command }) => match command {
             SecretCommands::Set { name, value } => commands::secret::set(&name, &value),
