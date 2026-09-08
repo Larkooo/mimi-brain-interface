@@ -162,10 +162,32 @@ pub fn recent() -> Vec<Entry> {
         .collect()
 }
 
+/// How much of the rolling buffer a turn is allowed to see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// Everything mimi has seen on every channel. Only safe for turns
+    /// authored by the owner.
+    CrossChannel,
+    /// Only the channel the turn arrived on. Used for guest turns — a guest
+    /// in a public server must not be shown the owner's DMs, Telegram
+    /// conversations, or chatter from other guilds.
+    ChannelOnly,
+}
+
 /// Render a `<recent_context>` preamble for a turn arriving on
 /// `(current_source, current_chat_id)`. Returns `None` if nothing relevant is
 /// available — so the caller can skip prepending the block entirely.
 pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<String> {
+    preamble_scoped(current_source, current_chat_id, Scope::CrossChannel)
+}
+
+/// Like [`preamble_for`], but restricts which entries are eligible. Callers
+/// that serve untrusted authors must pass [`Scope::ChannelOnly`].
+pub fn preamble_scoped(
+    current_source: &str,
+    current_chat_id: &str,
+    scope: Scope,
+) -> Option<String> {
     let entries = recent();
     let now = Utc::now();
 
@@ -188,12 +210,16 @@ pub fn preamble_for(current_source: &str, current_chat_id: &str) -> Option<Strin
     // `FIRST_TURN_LOOKBACK` on first-turn-after-restart to recover the full log.
     let same_channel_cap = if is_first_turn { FIRST_TURN_LOOKBACK } else { SAME_CHANNEL_TAIL };
 
-    let mut cross_channel: Vec<&Entry> = entries
-        .iter()
-        .rev()
-        .filter(|e| e.source != current_source || e.chat_id != current_chat_id)
-        .take(lookback)
-        .collect();
+    let mut cross_channel: Vec<&Entry> = match scope {
+        Scope::CrossChannel => entries
+            .iter()
+            .rev()
+            .filter(|e| e.source != current_source || e.chat_id != current_chat_id)
+            .take(lookback)
+            .collect(),
+        // Nothing from other channels ever reaches a scoped turn.
+        Scope::ChannelOnly => Vec::new(),
+    };
 
     let mut same_channel: Vec<&Entry> = entries
         .iter()
@@ -300,4 +326,36 @@ pub fn clear() -> std::io::Result<()> {
         OpenOptions::new().write(true).truncate(true).open(&path)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Point `paths::home()` at a scratch dir and seed the rolling buffer
+    /// with one entry per channel. Serialized by the caller — `MIMI_HOME` is
+    /// process-global.
+    fn seed(dir: &std::path::Path) {
+        unsafe { std::env::set_var("MIMI_HOME", dir) };
+        fs::create_dir_all(dir).unwrap();
+        append_user("telegram", "555", "larko", "owner-only telegram secret", None);
+        append_user("discord", "111", "guest", "hello in the public channel", None);
+    }
+
+    #[test]
+    fn channel_only_scope_hides_other_channels() {
+        let dir = std::env::temp_dir().join(format!("mimi-ctx-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        seed(&dir);
+
+        let cross = preamble_scoped("discord", "111", Scope::CrossChannel).unwrap();
+        assert!(cross.contains("owner-only telegram secret"));
+        assert!(cross.contains("hello in the public channel"));
+
+        let scoped = preamble_scoped("discord", "111", Scope::ChannelOnly).unwrap();
+        assert!(!scoped.contains("owner-only telegram secret"));
+        assert!(scoped.contains("hello in the public channel"));
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
