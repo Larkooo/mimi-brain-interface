@@ -416,9 +416,20 @@ async fn api_mcp_list() -> Result<Json<serde_json::Value>, (StatusCode, String)>
 
 // --- Backup ---
 
-async fn api_backup() -> Json<serde_json::Value> {
-    commands::backup::run();
-    Json(serde_json::json!({ "ok": true }))
+async fn api_backup() -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    // tar runs synchronously and can fail (disk full, missing binary, perms).
+    // Run it on the blocking pool so we don't stall the axum runtime, and
+    // bubble errors up as 500s instead of calling process::exit() (which
+    // would kill the whole dashboard server).
+    let info = tokio::task::spawn_blocking(commands::backup::create_backup)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("backup task join: {e}")))?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e))?;
+    Ok(Json(serde_json::json!({
+        "ok": true,
+        "path": info.path.display().to_string(),
+        "size": info.size,
+    })))
 }
 
 // --- Memory ---
