@@ -6,6 +6,20 @@ import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Plus, Trash2, Power, Clock } from 'lucide-react'
 
+/** "3m ago" / "in 2h" — schedules are only ever minutes-to-days away. */
+function relativeTime(iso: string): string {
+  const delta = Date.now() - new Date(iso).getTime()
+  if (Number.isNaN(delta)) return iso
+  const future = delta < 0
+  const s = Math.abs(delta) / 1000
+  const [value, unit] =
+    s < 60 ? [Math.round(s), 's']
+    : s < 3600 ? [Math.round(s / 60), 'm']
+    : s < 86400 ? [Math.round(s / 3600), 'h']
+    : [Math.round(s / 86400), 'd']
+  return future ? `in ${value}${unit}` : `${value}${unit} ago`
+}
+
 const SCHEDULE_PRESETS = [
   { label: 'Every 5 min', value: '*/5 * * * *' },
   { label: 'Every 10 min', value: '*/10 * * * *' },
@@ -23,6 +37,7 @@ export function CronsView() {
   const [customSchedule, setCustomSchedule] = useState('')
   const [prompt, setPrompt] = useState('')
   const [description, setDescription] = useState('')
+  const [error, setError] = useState('')
 
   const refresh = useCallback(async () => {
     try { setCrons(await getCrons()) } catch {}
@@ -33,7 +48,13 @@ export function CronsView() {
   const handleCreate = async () => {
     const sched = schedule || customSchedule
     if (!name.trim() || !sched.trim() || !prompt.trim()) return
-    await createCron(name, sched, prompt, description)
+    try {
+      await createCron(name, sched, prompt, description)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to create schedule')
+      return
+    }
+    setError('')
     setName(''); setSchedule('*/10 * * * *'); setCustomSchedule(''); setPrompt(''); setDescription('')
     setAdding(false)
     refresh()
@@ -123,6 +144,10 @@ export function CronsView() {
             className="bg-muted/40 border-border"
           />
 
+          {error && (
+            <div className="text-[11px] text-danger">{error}</div>
+          )}
+
           <div className="flex gap-2">
             <Button size="sm" onClick={handleCreate}
               disabled={!name.trim() || !(schedule || customSchedule).trim() || !prompt.trim()}>
@@ -154,6 +179,22 @@ export function CronsView() {
                   <div className="min-w-0 flex items-baseline gap-2 flex-wrap">
                     <span className="text-[13px] font-medium tracking-tight">{cron.name}</span>
                     <span className="text-[10px] text-muted-foreground font-mono">{cron.schedule}</span>
+                    {cron.schedule_error ? (
+                      <span className="text-[10px] text-danger">invalid: {cron.schedule_error}</span>
+                    ) : cron.next_run ? (
+                      <span className="text-[10px] text-muted-foreground/70">
+                        next {relativeTime(cron.next_run)}
+                      </span>
+                    ) : null}
+                    {cron.last_run && (
+                      <span
+                        className={`text-[10px] ${cron.last_status === 'ok' ? 'text-muted-foreground/70' : 'text-danger'}`}
+                        title={`${cron.last_run}${cron.last_status ? ` — ${cron.last_status}` : ''}`}
+                      >
+                        ran {relativeTime(cron.last_run)}
+                        {cron.last_status && cron.last_status !== 'ok' ? ` (${cron.last_status})` : ''}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="flex items-center gap-0.5 shrink-0">

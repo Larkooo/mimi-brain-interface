@@ -183,6 +183,12 @@ export interface CronJob {
   prompt: string;
   description: string;
   enabled: boolean;
+  /** Populated by the scheduler (`mimi cron run`) once the job has fired. */
+  last_run?: string | null;
+  last_status?: string | null;
+  last_duration_ms?: number | null;
+  next_run?: string | null;
+  schedule_error?: string | null;
 }
 
 export async function getCrons(): Promise<CronJob[]> {

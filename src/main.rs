@@ -3,6 +3,7 @@ mod channels;
 mod claude;
 mod commands;
 mod context_buffer;
+mod crons;
 mod dashboard;
 mod paths;
 mod subagents;
@@ -92,6 +93,24 @@ enum Commands {
     Subagent {
         #[command(subcommand)]
         command: SubagentCommands,
+    },
+    /// Run recurring prompts configured in the dashboard's schedules view
+    Cron {
+        #[command(subcommand)]
+        command: CronCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum CronCommands {
+    /// Run the scheduler in the foreground (intended for a systemd unit)
+    Run,
+    /// List configured schedules with their next and last run
+    List,
+    /// Fire a schedule right now, ignoring its cron expression
+    Trigger {
+        /// Schedule id or name
+        id: String,
     },
 }
 
@@ -494,6 +513,11 @@ async fn main() {
             SubagentCommands::Tail { id } => subagents::cli_tail(&id),
             SubagentCommands::Stop { id } => subagents::cli_stop(&id),
             SubagentCommands::Rm { id } => subagents::cli_rm(&id),
+        },
+        Some(Commands::Cron { command }) => match command {
+            CronCommands::Run => crons::cli_run(),
+            CronCommands::List => crons::cli_list(),
+            CronCommands::Trigger { id } => crons::cli_trigger(&id),
         },
     }
 }
