@@ -660,20 +660,69 @@ pub fn rm(id: &str) -> Result<(), String> {
 
 /// Read up to `limit` lines from the tail of stream.jsonl, parsing each as
 /// JSON. Returns parsed `Value`s in chronological order (oldest first).
+///
+/// Only the last ~4 MiB of the file is touched, so this stays fast as
+/// stream.jsonl grows. The dashboard hits this on every list-poll (per
+/// agent, every 5s) — slurping a multi-MB file each time was wasteful.
 pub fn tail_events(id: &str, limit: usize) -> Result<Vec<Value>, String> {
     let dir = agent_dir(id);
     let path = stream_path(&dir);
-    let contents = fs::read_to_string(&path).unwrap_or_default();
-    let lines: Vec<&str> = contents.lines().collect();
-    let start = lines.len().saturating_sub(limit);
-    let mut out = Vec::new();
-    for line in &lines[start..] {
+    let lines = read_tail_lines(&path, limit);
+    let mut out = Vec::with_capacity(lines.len());
+    for line in lines {
         if line.trim().is_empty() { continue; }
-        if let Ok(v) = serde_json::from_str::<Value>(line) {
+        if let Ok(v) = serde_json::from_str::<Value>(&line) {
             out.push(v);
         }
     }
     Ok(out)
+}
+
+/// Read approximately the last `limit` newline-separated lines from `path`
+/// without loading the whole file. Reads at most ~4 MiB from the tail and
+/// drops the leading partial line when we didn't reach the start of the
+/// file. Returns chronological order (oldest first).
+fn read_tail_lines(path: &Path, limit: usize) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    if limit == 0 {
+        return Vec::new();
+    }
+
+    // 4 MiB easily covers hundreds of typical stream events, including
+    // tool_result blobs. If a single line is bigger than this we lose it,
+    // which is acceptable — the alternative is unbounded reads.
+    const MAX_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+
+    let mut file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let total = match file.seek(SeekFrom::End(0)) {
+        Ok(n) => n,
+        Err(_) => return Vec::new(),
+    };
+    let to_read = MAX_TAIL_BYTES.min(total);
+    let from_start = to_read >= total;
+    if file.seek(SeekFrom::Start(total - to_read)).is_err() {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; to_read as usize];
+    if file.read_exact(&mut buf).is_err() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines: Vec<&str> = text.split('\n').collect();
+    // Trailing empty element if the file ended with a newline.
+    if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    // First line is potentially partial unless we read from offset 0.
+    if !from_start && !lines.is_empty() {
+        lines.remove(0);
+    }
+    let start = lines.len().saturating_sub(limit);
+    lines[start..].iter().map(|s| s.to_string()).collect()
 }
 
 // ---------- CLI surface (called from main.rs) ----------
