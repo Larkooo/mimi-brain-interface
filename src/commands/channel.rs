@@ -167,4 +167,18 @@ pub fn remove(name: &str) {
     } else {
         eprintln!("Channel '{}' not found.", name);
     }
+
+    // Bot token lives outside ~/.mimi at ~/.claude/channels/<type>/.env where
+    // the channel bridge reads it (see telegram::load_token / discord::load_token).
+    // Without this cleanup an old token survives removal — a real credential leak
+    // and a source of "wrong bot reconnects" after re-add.
+    if let Some(home) = dirs::home_dir() {
+        let env_path = home.join(".claude").join("channels").join(name).join(".env");
+        if env_path.exists() {
+            match fs::remove_file(&env_path) {
+                Ok(()) => println!("Wiped bot token: {}", env_path.display()),
+                Err(e) => eprintln!("Warning: failed to remove {}: {}", env_path.display(), e),
+            }
+        }
+    }
 }
