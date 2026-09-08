@@ -85,6 +85,78 @@ pub fn delete_entity(db: &Connection, id: i64) -> Result<(), String> {
     Ok(())
 }
 
+/// One relationship row resolved with the other end's name/type — what a
+/// caller actually wants when inspecting an entity's neighborhood (e.g.
+/// `mimi brain show <id>`). `direction` is `"out"` when the entity is the
+/// source of the relationship, `"in"` when it's the target. `other_*` always
+/// refer to the *other* end relative to the entity being viewed.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RelatedEntity {
+    pub relationship_id: i64,
+    pub direction: String,
+    pub r#type: String,
+    pub other_id: i64,
+    pub other_name: String,
+    pub other_type: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct EntityDetail {
+    #[serde(flatten)]
+    pub entity: Entity,
+    pub related: Vec<RelatedEntity>,
+}
+
+/// Load one entity by id along with all of its inbound and outbound
+/// relationships, joined with the other end's name + type. Returns
+/// `Err` if the entity doesn't exist.
+pub fn get_entity_detail(db: &Connection, id: i64) -> Result<EntityDetail, String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT id, type, name, properties, created_at, updated_at \
+             FROM entities WHERE id = ?1",
+        )
+        .map_err(|e| format!("failed to prepare entity query: {e}"))?;
+    let entity = stmt
+        .query_row(params![id], row_to_entity)
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => format!("entity #{id} not found"),
+            other => format!("failed to load entity: {other}"),
+        })?;
+
+    let mut stmt = db
+        .prepare(
+            "SELECT r.id, \
+                    CASE WHEN r.source_id = ?1 THEN 'out' ELSE 'in' END AS direction, \
+                    r.type, \
+                    CASE WHEN r.source_id = ?1 THEN r.target_id ELSE r.source_id END AS other_id, \
+                    e.name, e.type, r.created_at \
+             FROM relationships r \
+             JOIN entities e ON e.id = CASE WHEN r.source_id = ?1 THEN r.target_id ELSE r.source_id END \
+             WHERE r.source_id = ?1 OR r.target_id = ?1 \
+             ORDER BY direction, r.type, e.name",
+        )
+        .map_err(|e| format!("failed to prepare relationships query: {e}"))?;
+    let related: Vec<RelatedEntity> = stmt
+        .query_map(params![id], |row| {
+            Ok(RelatedEntity {
+                relationship_id: row.get(0)?,
+                direction: row.get(1)?,
+                r#type: row.get(2)?,
+                other_id: row.get(3)?,
+                other_name: row.get(4)?,
+                other_type: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|e| format!("relationships query failed: {e}"))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    Ok(EntityDetail { entity, related })
+}
+
 pub fn add_relationship(db: &Connection, source: i64, rel_type: &str, target: i64) -> Result<i64, String> {
     db.execute(
         "INSERT INTO relationships (source_id, target_id, type) VALUES (?1, ?2, ?3)",
