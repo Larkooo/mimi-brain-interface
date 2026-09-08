@@ -328,9 +328,10 @@ async fn api_channels_add(
 
 async fn api_channels_remove(
     axum::extract::Path(name): axum::extract::Path<String>,
-) -> Json<serde_json::Value> {
-    commands::channel::remove(&name);
-    Json(serde_json::json!({ "ok": true }))
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    commands::channel::remove(&name)
+        .map_err(|e| (StatusCode::NOT_FOUND, e))?;
+    Ok(Json(serde_json::json!({ "ok": true })))
 }
 
 async fn api_channels_toggle(

@@ -159,12 +159,40 @@ pub fn configure(channel_type: &str, token: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn remove(name: &str) {
+/// Remove a channel: delete its `~/.mimi/channels/<name>.json` config and any
+/// bot-token `.env` written by `configure` at `~/.claude/channels/<name>/.env`.
+/// Without the second step the credential survives a "delete" — bad both for
+/// privacy and for the next reconfigure-then-remove cycle, which would leak a
+/// stale token onto disk indefinitely.
+pub fn remove(name: &str) -> Result<(), String> {
     let path = paths::channels_dir().join(format!("{}.json", name));
+    let mut removed_anything = false;
+
     if path.exists() {
-        fs::remove_file(&path).ok();
+        fs::remove_file(&path)
+            .map_err(|e| format!("Failed to remove {}: {}", path.display(), e))?;
+        removed_anything = true;
+    }
+
+    // Best-effort cleanup of the plugin token file written by `configure`.
+    // The directory may also hold unrelated plugin files, so we only remove
+    // the `.env` we wrote and then try `remove_dir` (which only succeeds on
+    // an empty dir — perfect: anything else is left in place).
+    if let Some(home) = dirs::home_dir() {
+        let plugin_dir = home.join(".claude").join("channels").join(name);
+        let env_path = plugin_dir.join(".env");
+        if env_path.exists() {
+            fs::remove_file(&env_path)
+                .map_err(|e| format!("Failed to remove bot token {}: {}", env_path.display(), e))?;
+            removed_anything = true;
+        }
+        let _ = fs::remove_dir(&plugin_dir);
+    }
+
+    if removed_anything {
         println!("Removed channel: {}", name);
+        Ok(())
     } else {
-        eprintln!("Channel '{}' not found.", name);
+        Err(format!("Channel '{}' not found.", name))
     }
 }
