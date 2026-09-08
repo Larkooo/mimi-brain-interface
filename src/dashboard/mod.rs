@@ -14,7 +14,7 @@ mod nutrition;
 mod subagents;
 mod tasks;
 
-pub async fn serve(port: u16) {
+pub async fn serve(host: &str, port: u16) {
     // Try to find the React build directory
     // Check: cwd/dashboard/dist, exe/../../../dashboard/dist, ~/.mimi/dashboard/dist
     let candidates = [
@@ -103,7 +103,7 @@ pub async fn serve(port: u16) {
         eprintln!("Searched: cwd/dashboard/dist, exe dir, ~/.mimi/dashboard/dist");
     }
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("{}:{}", host, port))
         .await
         .expect("failed to bind");
 

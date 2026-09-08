@@ -28,6 +28,12 @@ enum Commands {
         /// Port to serve on
         #[arg(short, long, default_value = "3131")]
         port: u16,
+        /// Address to bind. Defaults to loopback — the dashboard has no
+        /// auth, so binding to 0.0.0.0 exposes brain DB, memory files,
+        /// bot tokens, and service control to anyone on the network.
+        /// Use `--host 0.0.0.0` only behind a trusted reverse proxy.
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
     },
     /// Query and manage the knowledge graph
     Brain {
@@ -370,7 +376,7 @@ async fn main() {
         None => commands::launch::run(),
         Some(Commands::Setup) => commands::setup::run(),
         Some(Commands::Status) => commands::status::run(),
-        Some(Commands::Dashboard { port }) => commands::dashboard::run(port).await,
+        Some(Commands::Dashboard { port, host }) => commands::dashboard::run(&host, port).await,
         Some(Commands::Brain { command }) => match command {
             BrainCommands::Stats => commands::brain::stats(),
             BrainCommands::Query { sql } => commands::brain::query(&sql),
